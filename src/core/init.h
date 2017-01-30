@@ -27,5 +27,6 @@ extern nni_mtx *nni_idlock;
 extern nni_idhash *nni_endpoints;
 extern nni_idhash *nni_pipes;
 extern nni_idhash *nni_sockets;
+extern nni_taskq *nni_main_taskq;
 
 #endif // CORE_INIT_H

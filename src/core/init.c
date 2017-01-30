@@ -15,6 +15,7 @@ nni_idhash *nni_endpoints;
 nni_idhash *nni_pipes;
 nni_idhash *nni_sockets;
 nni_mtx *nni_idlock;
+nni_taskq *nni_main_taskq;
 
 static nni_idhash nni_endpoints_x;
 static nni_idhash nni_pipes_x;
@@ -32,6 +33,12 @@ nni_init_helper(void)
 	if ((rv = nni_mtx_init(&nni_idlock_x)) != 0) {
 		return (rv);
 	}
+
+	// XXX: 8 should be based on cpu count...
+	if (nni_taskq_init(&nni_main_taskq, 8) != 0) {
+		return (rv);
+	}
+
 	if (((rv = nni_idhash_init(&nni_endpoints_x)) != 0) ||
 	    ((rv = nni_idhash_init(&nni_pipes_x)) != 0) ||
 	    ((rv = nni_idhash_init(&nni_sockets_x)) != 0)) {
@@ -64,6 +71,7 @@ nni_init(void)
 void
 nni_fini(void)
 {
+	nni_taskq_fini(nni_main_taskq);
 	nni_idhash_fini(&nni_endpoints_x);
 	nni_idhash_fini(&nni_pipes_x);
 	nni_idhash_fini(&nni_sockets_x);

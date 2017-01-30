@@ -31,6 +31,9 @@ struct nni_msgq {
 	int			mq_wwait;
 	nni_msg **		mq_msgs;
 
+	nni_taskq_ent		mq_putcq_tqe;
+	nni_taskq_ent		mq_getcq_tqe;
+
 	int			mq_notify_sig;
 	nni_cv			mq_notify_cv;
 	nni_thr			mq_notify_thr;
@@ -107,6 +110,7 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	if ((mq = NNI_ALLOC_STRUCT(mq)) == NULL) {
 		return (NNG_ENOMEM);
 	}
+	
 	if ((rv = nni_mtx_init(&mq->mq_lock)) != 0) {
 		goto fail;
 	}
@@ -386,6 +390,7 @@ static int
 nni_msgq_get_(nni_msgq *mq, nni_msg **msgp, nni_time expire, nni_signal *sig)
 {
 	int rv;
+	nni_list cq;
 
 	nni_mtx_lock(&mq->mq_lock);
 

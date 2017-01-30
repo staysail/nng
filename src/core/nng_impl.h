@@ -24,6 +24,7 @@
 #include "core/defs.h"
 
 #include "core/clock.h"
+#include "core/completion.h"
 #include "core/device.h"
 #include "core/idhash.h"
 #include "core/init.h"
@@ -35,6 +36,7 @@
 #include "core/platform.h"
 #include "core/protocol.h"
 #include "core/random.h"
+#include "core/taskq.h"
 #include "core/thread.h"
 #include "core/transport.h"
 

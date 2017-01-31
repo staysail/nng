@@ -38,6 +38,7 @@
 #include "core/random.h"
 #include "core/taskq.h"
 #include "core/thread.h"
+#include "core/timer.h"
 #include "core/transport.h"
 
 // These have to come after the others - particularly transport.h

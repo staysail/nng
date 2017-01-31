@@ -110,7 +110,7 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	if ((mq = NNI_ALLOC_STRUCT(mq)) == NULL) {
 		return (NNG_ENOMEM);
 	}
-	
+
 	if ((rv = nni_mtx_init(&mq->mq_lock)) != 0) {
 		goto fail;
 	}

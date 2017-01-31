@@ -51,6 +51,7 @@ typedef int64_t				nni_duration;   // Rel. time (usec).
 typedef void (*nni_worker)(void *);
 
 typedef struct nni_completion		nni_completion;
+typedef struct nni_cq			nni_cq;
 typedef struct nni_taskq		nni_taskq;
 typedef struct nni_taskq_ent		nni_taskq_ent;
 

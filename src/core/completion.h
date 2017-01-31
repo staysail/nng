@@ -14,6 +14,7 @@
 #include "core/list.h"
 #include "core/msgqueue.h"
 #include "core/taskq.h"
+#include "core/timer.h"
 
 // Completions are structures that are registered to deal with asynchronous
 // I/O.  Basically the caller submits a completion to a worker, which then
@@ -22,22 +23,26 @@
 
 struct nni_completion_base {
 	nni_list_node	cbase_node;
+	nni_cq *	cbase_cq;
+	int		cbase_sched;
 	int		cbase_type;
 	int		cbase_result;
 	size_t		cbase_xferred;
-	nni_time	cbase_expire;
+	nni_timer_node	cbase_expire;
 	nni_taskq_ent	cbase_tqe;
 };
-typedef struct nni_completion_base nni_completion_base;
+typedef struct nni_completion_base   nni_completion_base;
 
 #define comp_type	comp_base.cbase_type
 #define comp_node	comp_base.cbase_node
 #define comp_cb		comp_base.cbase_tqe.tqe_cb
 #define comp_arg	comp_base.cbase_tqe.tqe_arg
 #define comp_result	comp_base.cbase_result
+#define comp_sched	comp_base.cbase_sched
 #define comp_xferred	comp_base.cbase_xferred
 #define comp_expire	comp_base.cbase_expire
 #define comp_tqe	comp_base.cbase_tqe
+#define comp_cq		comp_base.cbase_cq
 
 struct nni_completion {
 	nni_completion_base comp_base;
@@ -106,5 +111,11 @@ struct nni_completion_resolve {
 #define NNI_COMPLETION_TYPE_ACCEPT		8       // nni_cp_accept
 #define NNI_COMPLETION_TYPE_CONNECT		9       // nni_cp_connect
 #define NNI_COMPLETION_TYPE_RESOLVE		10      // nni_cp_resolve
+
+extern void nni_cq_cancel(nni_completion *);
+extern void nni_cq_submit(nni_completion *);
+
+extern int nni_cq_init(nni_cq **);
+extern void nni_cq_fini(nni_cq *);
 
 #endif // CORE_COMPLETION_H

@@ -34,6 +34,8 @@ set (NNG_SOURCES
 
     core/clock.c
     core/clock.h
+    core/completion.c
+    core/completion.h
     core/device.c
     core/device.h
     core/endpt.c
@@ -66,6 +68,8 @@ set (NNG_SOURCES
     core/socket.h
     core/taskq.c
     core/taskq.h
+    core/timer.c
+    core/timer.h
     core/thread.c
     core/thread.h
     core/transport.c

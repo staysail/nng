@@ -439,6 +439,10 @@ nng_strerror(int num)
 
 	case NNG_ECANCELED:
 		return ("Operation aborted");
+
+	case NNG_ECONTINUE:
+		// User applications should never see this one.
+		return ("Continue processing");
 	}
 
 	if (num & NNG_ESYSERR) {

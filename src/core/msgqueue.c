@@ -39,7 +39,91 @@ struct nni_msgq {
 	nni_thr			mq_notify_thr;
 	nni_msgq_notify_fn	mq_notify_fn;
 	void *			mq_notify_arg;
+
+	int			mq_cq_wantw;
+	int			mq_cq_wantr;
+	nni_cq *		mq_get_cq;
+	nni_cq *		mq_put_cq;
+	nni_cq *		mq_canput_cq;
+	nni_cq *		mq_canget_cq;
 };
+
+
+static int
+nni_msgq_cq_get(nni_compl *c, void *arg)
+{
+	nni_msgq *mq = arg;
+
+	// This is called with the MQ lock already held.
+
+	if (c->c_type != NNI_COMPL_TYPE_GETMSG) {
+		// Should not happen!
+		return (NNG_EINVAL);
+	}
+	if (mq->mq_len == 0) {
+		mq->mq_cq_wantr = 1;
+		return (NNG_EAGAIN);
+	}
+	c->c_msg = mq->mq_msgs[mq->mq_get];
+	c->c_result = 0;
+	mq->mq_get++;
+	if (mq->mq_get == mq->mq_alloc) {
+		mq->mq_get = 0;
+	}
+	mq->mq_len--;
+	return (0);
+}
+
+
+static int
+nni_msgq_cq_put(nni_compl *c, void *arg)
+{
+	nni_msgq *mq = arg;
+
+	if (c->c_type != NNI_COMPL_TYPE_PUTMSG) {
+		return (NNG_EINVAL);
+	}
+	// XXX: deal with unbuffered!
+	if (mq->mq_len >= mq->mq_cap) {
+		mq->mq_cq_wantw = 1;
+		return (NNG_EAGAIN);
+	}
+	c->c_result = 0;
+	mq->mq_msgs[mq->mq_put] = c->c_msg;
+	c->c_msg = NULL;
+	mq->mq_put++;
+	if (mq->mq_put == mq->mq_alloc) {
+		mq->mq_put = 0;
+	}
+	mq->mq_len++;
+	return (0);
+}
+
+
+static int
+nni_msgq_cq_canget(nni_compl *c, void *arg)
+{
+	NNI_ARG_UNUSED(arg);
+
+	if (c->c_type != NNI_COMPL_TYPE_CANGETMSG) {
+		return (NNG_EINVAL);
+	}
+	c->c_result = 0;
+	return (NNG_ECONTINUE);
+}
+
+
+static int
+nni_msgq_cq_canput(nni_compl *c, void *arg)
+{
+	NNI_ARG_UNUSED(arg);
+
+	if (c->c_type != NNI_COMPL_TYPE_CANPUTMSG) {
+		return (NNG_EINVAL);
+	}
+	c->c_result = 0;
+	return (NNG_ECONTINUE);
+}
 
 
 // nni_msgq_notifier thread runs if events callbacks are registered on the
@@ -114,6 +198,12 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	if ((rv = nni_mtx_init(&mq->mq_lock)) != 0) {
 		goto fail;
 	}
+	if (((rv = nni_cq_init(&mq->mq_get_cq)) != 0) ||
+	    ((rv = nni_cq_init(&mq->mq_put_cq)) != 0) ||
+	    ((rv = nni_cq_init(&mq->mq_canget_cq)) != 0) ||
+	    ((rv = nni_cq_init(&mq->mq_canput_cq)) != 0)) {
+		goto fail;
+	}
 	if (((rv = nni_cv_init(&mq->mq_readable, &mq->mq_lock)) != 0) ||
 	    ((rv = nni_cv_init(&mq->mq_writeable, &mq->mq_lock)) != 0) ||
 	    ((rv = nni_cv_init(&mq->mq_drained, &mq->mq_lock)) != 0) ||
@@ -137,11 +227,17 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	mq->mq_rwait = 0;
 	mq->mq_notify_fn = NULL;
 	mq->mq_notify_arg = NULL;
+	mq->mq_cq_wantr = 0;
+	mq->mq_cq_wantw = 0;
 	*mqp = mq;
 
 	return (0);
 
 fail:
+	nni_cq_fini(mq->mq_get_cq);
+	nni_cq_fini(mq->mq_put_cq);
+	nni_cq_fini(mq->mq_canget_cq);
+	nni_cq_fini(mq->mq_canput_cq);
 	nni_cv_fini(&mq->mq_drained);
 	nni_cv_fini(&mq->mq_writeable);
 	nni_cv_fini(&mq->mq_readable);
@@ -162,6 +258,10 @@ nni_msgq_fini(nni_msgq *mq)
 	if (mq == NULL) {
 		return;
 	}
+	nni_cq_fini(mq->mq_get_cq);
+	nni_cq_fini(mq->mq_put_cq);
+	nni_cq_fini(mq->mq_canget_cq);
+	nni_cq_fini(mq->mq_canput_cq);
 	nni_thr_fini(&mq->mq_notify_thr);
 	nni_cv_fini(&mq->mq_drained);
 	nni_cv_fini(&mq->mq_writeable);
@@ -338,8 +438,10 @@ nni_msgq_put_(nni_msgq *mq, nni_msg *msg, nni_time expire, nni_signal *sig)
 		nni_cv_wake(&mq->mq_readable);
 	}
 	if (mq->mq_len < mq->mq_cap) {
+		nni_cq_run(mq->mq_canput_cq, nni_msgq_cq_canput, mq);
 		nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANPUT);
 	}
+	nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
 	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	nni_mtx_unlock(&mq->mq_lock);
 
@@ -379,6 +481,7 @@ nni_msgq_putback(nni_msgq *mq, nni_msg *msg)
 		nni_cv_wake(&mq->mq_readable);
 	}
 
+	nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
 	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	nni_mtx_unlock(&mq->mq_lock);
 
@@ -448,8 +551,10 @@ nni_msgq_get_(nni_msgq *mq, nni_msg **msgp, nni_time expire, nni_signal *sig)
 		nni_cv_wake(&mq->mq_writeable);
 	}
 	if (mq->mq_len) {
+		nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
 		nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	}
+	nni_cq_run(mq->mq_canput_cq, nni_msgq_cq_canput, mq);
 	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANPUT);
 	nni_mtx_unlock(&mq->mq_lock);
 

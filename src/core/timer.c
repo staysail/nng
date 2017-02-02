@@ -82,7 +82,10 @@ nni_timer_cancel(nni_timer_node *node)
 
 	nni_mtx_lock(&timer->t_list_mx);
 	nni_mtx_lock(&timer->t_run_mx);
-	nni_list_remove(&timer->t_entries, node);
+	if (node->t_sched) {
+		nni_list_remove(&timer->t_entries, node);
+		node->t_sched = 0;
+	}
 	nni_mtx_unlock(&timer->t_run_mx);
 	nni_mtx_lock(&timer->t_list_mx);
 }
@@ -107,6 +110,7 @@ nni_timer_schedule(nni_timer_node *node)
 	} else {
 		nni_list_append(&timer->t_entries, node);
 	}
+	node->t_sched = 1;
 	if (wake) {
 		nni_cv_wake(&timer->t_cv);
 	}
@@ -143,6 +147,7 @@ nni_timer_loop(void *arg)
 		}
 
 		nni_list_remove(&timer->t_entries, node);
+		node->t_sched = 0;
 
 		// The lock ordering here is important.  We acquire the run
 		// lock before dropping the list lock.  One the run is done,

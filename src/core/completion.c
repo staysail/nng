@@ -16,7 +16,6 @@ struct nni_cq {
 	nni_list	cq_ents;
 	int		cq_close;
 	nni_mtx		cq_mtx;
-	nni_list_node	cq_node;        // On global list of CQs.
 };
 
 int
@@ -28,7 +27,7 @@ nni_cq_init(nni_cq **cqp)
 	if ((cq = NNI_ALLOC_STRUCT(cq)) == NULL) {
 		return (NNG_ENOMEM);
 	}
-	NNI_LIST_INIT(&cq->cq_ents, nni_completion, comp_node);
+	NNI_LIST_INIT(&cq->cq_ents, nni_compl, c_node);
 	if ((rv = nni_mtx_init(&cq->cq_mtx)) != 0) {
 		nni_cq_fini(cq);
 		NNI_FREE_STRUCT(cq);
@@ -42,15 +41,18 @@ nni_cq_init(nni_cq **cqp)
 void
 nni_cq_fini(nni_cq *cq)
 {
-	nni_completion *comp;
+	nni_compl *c;
 
+	if (cq == NULL) {
+		return;
+	}
 	nni_mtx_lock(&cq->cq_mtx);
 	cq->cq_close = 1;
-	while ((comp = nni_list_first(&cq->cq_ents)) != NULL) {
-		nni_list_remove(&cq->cq_ents, comp);
-		comp->comp_sched = 0;
-		comp->comp_result = NNG_ECANCELED;
-		nni_taskq_dispatch(nni_main_taskq, &comp->comp_tqe);
+	while ((c = nni_list_first(&cq->cq_ents)) != NULL) {
+		nni_list_remove(&cq->cq_ents, c);
+		c->c_sched = 0;
+		c->c_result = NNG_ECANCELED;
+		nni_taskq_dispatch(nni_main_taskq, &c->c_tqe);
 	}
 	nni_mtx_unlock(&cq->cq_mtx);
 	nni_mtx_fini(&cq->cq_mtx);
@@ -58,98 +60,117 @@ nni_cq_fini(nni_cq *cq)
 }
 
 
-int
-nni_run_cq(nni_cq *cq, int (*func)(nni_completion *, void *), void *arg)
+void
+nni_cq_run(nni_cq *cq, int (*func)(nni_compl *, void *), void *arg)
 {
-	nni_completion *comp;
-	nni_completion *ncomp;
+	nni_compl *c;
+	nni_compl *ncomp;
 	int rv;
 
 	nni_mtx_lock(&cq->cq_mtx);
 	ncomp = nni_list_first(&cq->cq_ents);
-	while ((comp = ncomp) != NULL) {
-		ncomp = nni_list_next(&cq->cq_ents, comp);
-		rv = func(comp, arg);
+	while ((c = ncomp) != NULL) {
+		ncomp = nni_list_next(&cq->cq_ents, c);
+		rv = func(c, arg);
 		switch (rv) {
 		case 0:
-			nni_list_remove(&cq->cq_ents, comp);
-			comp->comp_sched = 0;
-			nni_taskq_dispatch(nni_main_taskq, &comp->comp_tqe);
-			continue;
-
-		case NNG_EAGAIN:
-			// Still in progress, and don't stop, just keep
-			// checking.
-			continue;
-
+			nni_list_remove(&cq->cq_ents, c);
+			c->c_sched = 0;
+			nni_taskq_dispatch(nni_main_taskq, &c->c_tqe);
+			break;
+		case NNG_ECONTINUE:
+			// Continue running callbacks, but don't remove them.
+			nni_taskq_dispatch(nni_main_taskq, &c->c_tqe);
+			break;
 		default:
-			// All other errors just stop processing.
-			nni_mtx_lock(&cq->cq_mtx);
-			return (rv);
+			// All others indicate done (should be NNG_EAGAIN).
+			nni_mtx_unlock(&cq->cq_mtx);
+			return;
 		}
 	}
 	nni_mtx_unlock(&cq->cq_mtx);
-	return (0);
 }
 
 
 void
-nni_cq_cancel(nni_completion *comp)
+nni_cq_cancel(nni_compl *c)
 {
 	nni_cq *cq;
 
-	if ((cq = comp->comp_cq) == NULL) {
+	if ((cq = c->c_cq) == NULL) {
 		return;
 	}
 	nni_mtx_lock(&cq->cq_mtx);
-	if (comp->comp_sched != 0) {
-		nni_list_remove(&cq->cq_ents, comp);
-		comp->comp_result = NNG_ECANCELED;
-		comp->comp_sched = 0;
-		nni_taskq_dispatch(nni_main_taskq, &comp->comp_tqe);
+	nni_timer_cancel(&c->c_expire);
+	if (c->c_sched != 0) {
+		nni_list_remove(&cq->cq_ents, c);
+		c->c_result = NNG_ECANCELED;
+		c->c_sched = 0;
+		nni_taskq_dispatch(nni_main_taskq, &c->c_tqe);
 	}
 	nni_mtx_unlock(&cq->cq_mtx);
 }
 
 
-#if 0
-struct nni_cq_expire_arg {
-	nni_time	now;
-	nni_time	expire;
-};
-
-static int
-nni_cq_expire(nni_cq *cq, void *arg)
+static void
+nni_cq_expire(void *arg)
 {
-	nni_time now = *(nni_time *) arg;
-
-	if (now >= comp->comp_expire) {
-		comp->comp_result = NNG_ETIMEDOUT;
-		return (0);
-	}
-	if (comp->comp_expire < cq->cq_expire) {
-		cq->cq_expire = comp->comp_expire;
-	}
-	return (NNG_EAGAIN);
-}
-
-
-#endif
-
-void
-nni_cq_submit(nni_completion *comp)
-{
-	int resched = 0;
-	nni_cq *cq = comp->comp_cq;
+	nni_compl *c = arg;
+	nni_cq *cq = c->c_cq;
 
 	nni_mtx_lock(&cq->cq_mtx);
-	nni_list_append(&cq->cq_ents, comp);
-
-	if ((comp->comp_expire.t_expire != NNI_TIME_NEVER) &&
-	    (comp->comp_expire.t_expire != NNI_TIME_ZERO)) {
-		nni_timer_schedule(&comp->comp_expire);
+	if (c->c_sched) {
+		nni_list_remove(&cq->cq_ents, c);
+		c->c_result = NNG_ETIMEDOUT;
+		c->c_sched = 0;
+		nni_taskq_dispatch(nni_main_taskq, &c->c_tqe);
 	}
 	nni_mtx_unlock(&cq->cq_mtx);
+}
 
-	// XXX schedule expiration
+
+void
+nni_compl_submit(nni_compl *c, nni_cq *cq, nni_time expire)
+{
+	int resched = 0;
+
+	c->c_cq = cq;
+
+	nni_mtx_lock(&cq->cq_mtx);
+	nni_list_append(&cq->cq_ents, c);
+
+	c->c_expire.t_expire = expire;
+	if ((expire != NNI_TIME_NEVER) && (expire != NNI_TIME_ZERO)) {
+		c->c_expire.t_cb = nni_cq_expire;
+		c->c_expire.t_arg = c;
+		nni_timer_schedule(&c->c_expire);
+	}
+	nni_mtx_unlock(&cq->cq_mtx);
+}
+
+
+void
+nni_compl_init(nni_compl *c, int type, nni_cb cb, void *arg)
+{
+	memset(c, 0, sizeof (*c));
+	NNI_LIST_NODE_INIT(&c->c_node);
+	NNI_LIST_NODE_INIT(&c->c_expire.t_node);
+	nni_taskq_ent_init(&c->c_tqe, cb, arg);
+	c->c_type = type;
+}
+
+
+void
+nni_compl_init_canget(nni_compl *c, nni_msgq *mq, nni_cb cb, void *arg)
+{
+	nni_compl_init(c, NNI_COMPL_TYPE_CANGETMSG, cb, arg);
+	c->c_mq = mq;
+}
+
+
+void
+nni_compl_init_canput(nni_compl *c, nni_msgq *mq, nni_cb cb, void *arg)
+{
+	nni_compl_init(c, NNI_COMPL_TYPE_CANPUTMSG, cb, arg);
+	c->c_mq = mq;
 }

@@ -21,101 +21,48 @@
 // notifies the caller by updating the completion and calling the callback.
 // The completion will always be executed exactly once.
 
-struct nni_completion_base {
-	nni_list_node	cbase_node;
-	nni_cq *	cbase_cq;
-	int		cbase_sched;
-	int		cbase_type;
-	int		cbase_result;
-	size_t		cbase_xferred;
-	nni_timer_node	cbase_expire;
-	nni_taskq_ent	cbase_tqe;
-};
-typedef struct nni_completion_base   nni_completion_base;
+struct nni_compl {
+	nni_list_node	c_node;
+	nni_cq *	c_cq;
+	int		c_sched;
+	int		c_type;
+	int		c_result;
+	size_t		c_xferred;
+	nni_timer_node	c_expire;
+	nni_taskq_ent	c_tqe;
 
-#define comp_type	comp_base.cbase_type
-#define comp_node	comp_base.cbase_node
-#define comp_cb		comp_base.cbase_tqe.tqe_cb
-#define comp_arg	comp_base.cbase_tqe.tqe_arg
-#define comp_result	comp_base.cbase_result
-#define comp_sched	comp_base.cbase_sched
-#define comp_xferred	comp_base.cbase_xferred
-#define comp_expire	comp_base.cbase_expire
-#define comp_tqe	comp_base.cbase_tqe
-#define comp_cq		comp_base.cbase_cq
-
-struct nni_completion {
-	nni_completion_base comp_base;
-};
-
-struct nni_completion_timer {
-	nni_completion_base comp_base;
-};
-
-struct nni_completion_rwpipe {  // Shared by READPIPE and READPIPE
-	nni_completion_base	comp_base;
-	nni_pipe *		comp_pipe;
-	nni_iov *		comp_iov;
-	int			comp_iovcnt;
-};
-
-struct nni_completion_getmsg {
-	nni_completion_base	comp_base;
-	nni_msgq *		comp_msgq;
-	nni_msg **		comp_msgp;
-};
-
-struct nni_completion_putmsg {
-	nni_completion_base	comp_base;
-	nni_msgq *		comp_msgq;
-	nni_msg *		comp_msg;
-};
-
-struct nni_completion_cangetmsg {
-	nni_completion_base	comp_base;
-	nni_msgq *		comp_msgq;
-};
-
-struct nni_completion_canputmsg {
-	nni_completion_base	comp_base;
-	nni_msgq *		comp_msgq;
-};
-
-struct nni_completion_accept {
-	nni_completion_base	comp_base;
-	nni_ep *		comp_ep;
-	nni_pipe **		comp_pipep;
-};
-
-struct nni_completion_connect {
-	nni_completion_base	comp_base;
-	nni_ep *		comp_ep;
-	nni_pipe **		comp_pipep;
-};
-
-struct nni_completion_resolve {
-	nni_completion_base	comp_base;
-	const char *		comp_host;
-	nni_sockaddr *		comp_addr;
+	// These are specific to different completion types.
+	nni_msgq *	c_mq;
+	nni_msg *	c_msg;
+	nni_pipe *	c_pipe;
+	nni_ep *	c_ep;
+	nni_iov *	c_iov;
+	int		c_iovcnt;
+	const char *	c_host;
+	nni_sockaddr *	c_addr;
 };
 
 // Completion types.
-#define NNI_COMPLETION_TYPE_NONE		0
-#define NNI_COMPLETION_TYPE_TIMER		1       // nni_cp_timer
-#define NNI_COMPLETION_TYPE_READPIPE		2       // nni_cp_rwpipe
-#define NNI_COMPLETION_TYPE_WRITEPIPE		3       // nni_cp_rwpipe
-#define NNI_COMPLETION_TYPE_GETMSG		4       // nni_cp_getmsg
-#define NNI_COMPLETION_TYPE_PUTMSG		5       // nni_cp_putmsg
-#define NNI_COMPLETION_TYPE_CANGETMSG		6       // nni_cp_canget
-#define NNI_COMPLETION_TYPE_CANPUTMSG		7       // nni_cp_canput
-#define NNI_COMPLETION_TYPE_ACCEPT		8       // nni_cp_accept
-#define NNI_COMPLETION_TYPE_CONNECT		9       // nni_cp_connect
-#define NNI_COMPLETION_TYPE_RESOLVE		10      // nni_cp_resolve
+#define NNI_COMPL_TYPE_NONE		0
+#define NNI_COMPL_TYPE_TIMER		1
+#define NNI_COMPL_TYPE_READPIPE		2
+#define NNI_COMPL_TYPE_WRITEPIPE	3
+#define NNI_COMPL_TYPE_GETMSG		4
+#define NNI_COMPL_TYPE_PUTMSG		5
+#define NNI_COMPL_TYPE_CANGETMSG	6
+#define NNI_COMPL_TYPE_CANPUTMSG	7
+#define NNI_COMPL_TYPE_ACCEPT		8
+#define NNI_COMPL_TYPE_CONNECT		9
+#define NNI_COMPL_TYPE_RESOLVE		10
 
-extern void nni_cq_cancel(nni_completion *);
-extern void nni_cq_submit(nni_completion *);
-
+extern void nni_cq_run(nni_cq *, int (*)(nni_compl *, void *), void *);
 extern int nni_cq_init(nni_cq **);
 extern void nni_cq_fini(nni_cq *);
+
+extern void nni_compl_cancel(nni_compl *);
+extern void nni_compl_submit(nni_compl *, nni_cq *, nni_time);
+extern void nni_compl_init(nni_compl *, int, nni_cb, void *);
+extern void nni_compl_init_canput(nni_compl *, nni_msgq *, nni_cb, void *);
+extern void nni_compl_init_canget(nni_compl *, nni_msgq *, nni_cb, void *);
 
 #endif // CORE_COMPLETION_H

@@ -131,15 +131,8 @@ extern int nni_msgq_cap(nni_msgq *mq);
 // nni_msgq_len returns the number of messages currently in the queue.
 extern int nni_msgq_len(nni_msgq *mq);
 
-#define NNI_MSGQ_NOTIFY_CANPUT		1
-#define NNI_MSGQ_NOTIFY_CANGET		2
 
-typedef void (*nni_msgq_notify_fn)(nni_msgq *, int, void *);
-
-// nni_msgq_notify registers a function to be called when the message
-// queue state changes.  It notifies that the queue is readable, or writeable.
-// Only one function can be registered (for simplicity), and it is called
-// outside of the queue's lock.
-extern int nni_msgq_notify(nni_msgq *, nni_msgq_notify_fn, void *);
+extern void nni_msgq_notify_canget(nni_compl *, nni_msgq *, nni_cb, void *);
+extern void nni_msgq_notify_canput(nni_compl *, nni_msgq *, nni_cb, void *);
 
 #endif  // CORE_MSQUEUE_H

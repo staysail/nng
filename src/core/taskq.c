@@ -28,9 +28,12 @@ nni_taskq_thread(void *self)
 	for (;;) {
 		if ((ent = nni_list_first(&tq->tq_ents)) != NULL) {
 			nni_list_remove(&tq->tq_ents, ent);
-			ent->tqe_tq = NULL;
+			ent->tqe_flags &= ~(NNI_TQE_SCHED);
+			ent->tqe_flags |= NNI_TQE_RUN;
 			nni_mtx_unlock(&tq->tq_mtx);
 			ent->tqe_cb(ent->tqe_arg);
+			nni_mtx_lock(&tq->tq_mtx);
+			ent->tqe_flags &= ~(NNI_TQE_RUN);
 			continue;
 		}
 
@@ -109,9 +112,14 @@ nni_taskq_dispatch(nni_taskq *tq, nni_taskq_ent *ent)
 		nni_mtx_unlock(&tq->tq_mtx);
 		return (NNG_ECLOSED);
 	}
+	if ((ent->tqe_flags & NNI_TQE_CANCEL) != 0) {
+		nni_mtx_unlock(&tq->tq_mtx);
+		return (NNG_ECANCELED);
+	}
 	// It might already be scheduled... if so don't redo it.
-	if (ent->tqe_tq == NULL) {
+	if ((ent->tqe_flags & NNI_TQE_SCHED) == 0) {
 		ent->tqe_tq = tq;
+		ent->tqe_flags |= NNI_TQE_SCHED;
 		nni_list_append(&tq->tq_ents, ent);
 	}
 	nni_cv_wake(&tq->tq_cv);
@@ -126,18 +134,30 @@ nni_taskq_cancel(nni_taskq_ent *ent)
 	nni_taskq *tq;
 
 	if ((tq = ent->tqe_tq) == NULL) {
-		return (NNG_ENOENT);
+		return (0);
 	}
 	nni_mtx_lock(&tq->tq_mtx);
 	if (ent->tqe_tq == NULL) {
 		nni_mtx_unlock(&tq->tq_mtx);
-		return (NNG_ENOENT);
+		return (0);
 	}
 	if ((ent->tqe_tq) != tq) {
 		nni_mtx_unlock(&tq->tq_mtx);
 		return (NNG_EBUSY);
 	}
-	nni_list_remove(&tq->tq_ents, ent);
+	ent->tqe_flags |= NNI_TQE_CANCEL;
+	if ((ent->tqe_flags & NNI_TQE_SCHED) != 0) {
+		ent->tqe_flags &= ~(NNI_TQE_SCHED);
+		nni_list_remove(&tq->tq_ents, ent);
+	}
+
+	// If the task is actually running, wait for it to end.
+	while (ent->tqe_flags != NNI_TQE_CANCEL) {
+		nni_mtx_unlock(&tq->tq_mtx);
+		nni_usleep(1000);
+		nni_mtx_lock(&tq->tq_mtx);
+	}
+	ent->tqe_flags = NNI_TQE_CANCEL;
 	nni_mtx_unlock(&tq->tq_mtx);
 	return (0);
 }
@@ -150,4 +170,5 @@ nni_taskq_ent_init(nni_taskq_ent *ent, nni_cb cb, void *arg)
 	ent->tqe_cb = cb;
 	ent->tqe_arg = arg;
 	ent->tqe_tq = NULL;
+	ent->tqe_flags = 0;
 }

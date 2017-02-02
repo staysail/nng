@@ -87,7 +87,7 @@ nni_timer_cancel(nni_timer_node *node)
 		node->t_sched = 0;
 	}
 	nni_mtx_unlock(&timer->t_run_mx);
-	nni_mtx_lock(&timer->t_list_mx);
+	nni_mtx_unlock(&timer->t_list_mx);
 }
 
 

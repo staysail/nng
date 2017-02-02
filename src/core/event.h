@@ -15,6 +15,7 @@
 
 struct nng_event {
 	int		e_type;
+	uint32_t	e_sockid;
 	nni_sock *	e_sock;
 	nni_ep *	e_ep;
 	nni_pipe *	e_pipe;
@@ -30,6 +31,8 @@ struct nng_notify {
 	nng_notify_func n_func;
 	void *		n_arg;
 	int		n_mask;
+	nni_compl	n_compl;
+	nng_event	n_ev;
 };
 
 extern void nni_notifier(void *);

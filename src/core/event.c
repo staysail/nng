@@ -24,6 +24,7 @@ nni_ev_init(nni_event *event, int type, nni_sock *sock)
 	NNI_LIST_NODE_INIT(&event->e_node);
 	event->e_type = type;
 	event->e_sock = sock;
+	event->e_sockid = sock->s_id;
 	return (0);
 }
 
@@ -114,6 +115,15 @@ nni_notifier(void *arg)
 }
 
 
+static void
+nni_notify_can_sendrecv(void *arg)
+{
+	nni_notify *notify = arg;
+
+	notify->n_func(&notify->n_ev, notify->n_arg);
+}
+
+
 nni_notify *
 nni_add_notify(nni_sock *sock, int mask, nng_notify_func fn, void *arg)
 {
@@ -122,14 +132,26 @@ nni_add_notify(nni_sock *sock, int mask, nng_notify_func fn, void *arg)
 	if ((notify = NNI_ALLOC_STRUCT(notify)) == NULL) {
 		return (NULL);
 	}
+	memset(notify, 0, sizeof (*notify));
 	notify->n_func = fn;
 	notify->n_arg = arg;
 	notify->n_mask = mask;
+	nni_ev_init(&notify->n_ev, mask, sock);
+
 	NNI_LIST_NODE_INIT(&notify->n_node);
 
-	nni_mtx_lock(&sock->s_notify_mx);
-	nni_list_append(&sock->s_notify, notify);
-	nni_mtx_unlock(&sock->s_notify_mx);
+	switch (mask) {
+	case NNG_EV_CAN_RCV:
+		nni_msgq_notify_canget(&notify->n_compl, sock->s_urq,
+		    nni_notify_can_sendrecv, notify);
+		break;
+	case NNG_EV_CAN_SND:
+		nni_msgq_notify_canput(&notify->n_compl, sock->s_uwq,
+		    nni_notify_can_sendrecv, notify);
+		break;
+	default:
+		break;
+	}
 	return (notify);
 }
 
@@ -137,8 +159,6 @@ nni_add_notify(nni_sock *sock, int mask, nng_notify_func fn, void *arg)
 void
 nni_rem_notify(nni_sock *sock, nni_notify *notify)
 {
-	nni_mtx_lock(&sock->s_notify_mx);
-	nni_list_remove(&sock->s_notify, notify);
-	nni_mtx_unlock(&sock->s_notify_mx);
+	nni_compl_fini(&notify->n_compl);
 	NNI_FREE_STRUCT(notify);
 }

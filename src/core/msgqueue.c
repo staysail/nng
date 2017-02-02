@@ -15,37 +15,31 @@
 // side can close, and they may be closed more than once.
 
 struct nni_msgq {
-	nni_mtx			mq_lock;
-	nni_cv			mq_readable;
-	nni_cv			mq_writeable;
-	nni_cv			mq_drained;
-	int			mq_cap;
-	int			mq_alloc; // alloc is cap + 2...
-	int			mq_len;
-	int			mq_get;
-	int			mq_put;
-	int			mq_closed;
-	int			mq_puterr;
-	int			mq_geterr;
-	int			mq_rwait; // readers waiting (unbuffered)
-	int			mq_wwait;
-	nni_msg **		mq_msgs;
+	nni_mtx		mq_lock;
+	nni_cv		mq_readable;
+	nni_cv		mq_writeable;
+	nni_cv		mq_drained;
+	int		mq_cap;
+	int		mq_alloc;         // alloc is cap + 2...
+	int		mq_len;
+	int		mq_get;
+	int		mq_put;
+	int		mq_closed;
+	int		mq_puterr;
+	int		mq_geterr;
+	int		mq_rwait;         // readers waiting (unbuffered)
+	int		mq_wwait;
+	nni_msg **	mq_msgs;
 
-	nni_taskq_ent		mq_putcq_tqe;
-	nni_taskq_ent		mq_getcq_tqe;
+	nni_taskq_ent	mq_putcq_tqe;
+	nni_taskq_ent	mq_getcq_tqe;
 
-	int			mq_notify_sig;
-	nni_cv			mq_notify_cv;
-	nni_thr			mq_notify_thr;
-	nni_msgq_notify_fn	mq_notify_fn;
-	void *			mq_notify_arg;
-
-	int			mq_cq_wantw;
-	int			mq_cq_wantr;
-	nni_cq *		mq_get_cq;
-	nni_cq *		mq_put_cq;
-	nni_cq *		mq_canput_cq;
-	nni_cq *		mq_canget_cq;
+	int		mq_cq_wantw;
+	int		mq_cq_wantr;
+	nni_cq *	mq_get_cq;
+	nni_cq *	mq_put_cq;
+	nni_cq *	mq_canput_cq;
+	nni_cq *	mq_canget_cq;
 };
 
 
@@ -126,50 +120,19 @@ nni_msgq_cq_canput(nni_compl *c, void *arg)
 }
 
 
-// nni_msgq_notifier thread runs if events callbacks are registered on the
-// message queue, and calls the notification callbacks outside of the
-// lock.  It looks at the actual msgq state to trigger the right events.
-static void
-nni_msgq_notifier(void *arg)
+void
+nni_msgq_notify_canget(nni_compl *c, nni_msgq *mq, nni_cb cb, void *arg)
 {
-	nni_msgq *mq = arg;
-	int sig;
-	nni_msgq_notify_fn fn;
-	void *fnarg;
-
-	for (;;) {
-		nni_mtx_lock(&mq->mq_lock);
-		while ((mq->mq_notify_sig == 0) && (!mq->mq_closed)) {
-			nni_cv_wait(&mq->mq_notify_cv);
-		}
-		if (mq->mq_closed) {
-			nni_mtx_unlock(&mq->mq_lock);
-			break;
-		}
-
-		sig = mq->mq_notify_sig;
-		mq->mq_notify_sig = 0;
-
-		fn = mq->mq_notify_fn;
-		fnarg = mq->mq_notify_arg;
-		nni_mtx_unlock(&mq->mq_lock);
-
-		if (fn != NULL) {
-			fn(mq, sig, fnarg);
-		}
-	}
+	nni_compl_init_canget(c, mq, cb, arg);
+	nni_compl_submit(c, mq->mq_canget_cq, NNI_TIME_NEVER);
 }
 
 
-// nni_msgq_kick kicks the msgq notification thread.  It should be called
-// with the lock held.
-static void
-nni_msgq_kick(nni_msgq *mq, int sig)
+void
+nni_msgq_notify_canput(nni_compl *c, nni_msgq *mq, nni_cb cb, void *arg)
 {
-	if (mq->mq_notify_fn != NULL) {
-		mq->mq_notify_sig |= sig;
-		nni_cv_wake(&mq->mq_notify_cv);
-	}
+	nni_compl_init_canput(c, mq, cb, arg);
+	nni_compl_submit(c, mq->mq_canput_cq, NNI_TIME_NEVER);
 }
 
 
@@ -206,8 +169,7 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	}
 	if (((rv = nni_cv_init(&mq->mq_readable, &mq->mq_lock)) != 0) ||
 	    ((rv = nni_cv_init(&mq->mq_writeable, &mq->mq_lock)) != 0) ||
-	    ((rv = nni_cv_init(&mq->mq_drained, &mq->mq_lock)) != 0) ||
-	    ((rv = nni_cv_init(&mq->mq_notify_cv, &mq->mq_lock)) != 0)) {
+	    ((rv = nni_cv_init(&mq->mq_drained, &mq->mq_lock)) != 0)) {
 		goto fail;
 	}
 	if ((mq->mq_msgs = nni_alloc(sizeof (nng_msg *) * alloc)) == NULL) {
@@ -225,8 +187,6 @@ nni_msgq_init(nni_msgq **mqp, int cap)
 	mq->mq_geterr = 0;
 	mq->mq_wwait = 0;
 	mq->mq_rwait = 0;
-	mq->mq_notify_fn = NULL;
-	mq->mq_notify_arg = NULL;
 	mq->mq_cq_wantr = 0;
 	mq->mq_cq_wantw = 0;
 	*mqp = mq;
@@ -262,7 +222,6 @@ nni_msgq_fini(nni_msgq *mq)
 	nni_cq_fini(mq->mq_put_cq);
 	nni_cq_fini(mq->mq_canget_cq);
 	nni_cq_fini(mq->mq_canput_cq);
-	nni_thr_fini(&mq->mq_notify_thr);
 	nni_cv_fini(&mq->mq_drained);
 	nni_cv_fini(&mq->mq_writeable);
 	nni_cv_fini(&mq->mq_readable);
@@ -281,27 +240,6 @@ nni_msgq_fini(nni_msgq *mq)
 
 	nni_free(mq->mq_msgs, mq->mq_alloc * sizeof (nng_msg *));
 	NNI_FREE_STRUCT(mq);
-}
-
-
-int
-nni_msgq_notify(nni_msgq *mq, nni_msgq_notify_fn fn, void *arg)
-{
-	int rv;
-
-	nni_thr_fini(&mq->mq_notify_thr);
-
-	nni_mtx_lock(&mq->mq_lock);
-	rv = nni_thr_init(&mq->mq_notify_thr, nni_msgq_notifier, mq);
-	if (rv != 0) {
-		nni_mtx_unlock(&mq->mq_lock);
-		return (rv);
-	}
-	mq->mq_notify_fn = fn;
-	mq->mq_notify_arg = arg;
-	nni_thr_run(&mq->mq_notify_thr);
-	nni_mtx_unlock(&mq->mq_lock);
-	return (0);
 }
 
 
@@ -361,7 +299,6 @@ nni_msgq_signal(nni_msgq *mq, int *signal)
 	mq->mq_wwait = 0;
 	nni_cv_wake(&mq->mq_readable);
 	nni_cv_wake(&mq->mq_writeable);
-	nni_cv_wake(&mq->mq_notify_cv);
 	nni_mtx_unlock(&mq->mq_lock);
 }
 
@@ -415,7 +352,7 @@ nni_msgq_put_(nni_msgq *mq, nni_msg *msg, nni_time expire, nni_signal *sig)
 		// if we are unbuffered, kick the notifier, because we're
 		// writable.
 		if (mq->mq_cap == 0) {
-			nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
+			nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
 		}
 
 		// not writeable, so wait until something changes
@@ -439,10 +376,8 @@ nni_msgq_put_(nni_msgq *mq, nni_msg *msg, nni_time expire, nni_signal *sig)
 	}
 	if (mq->mq_len < mq->mq_cap) {
 		nni_cq_run(mq->mq_canput_cq, nni_msgq_cq_canput, mq);
-		nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANPUT);
 	}
 	nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
-	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	nni_mtx_unlock(&mq->mq_lock);
 
 	return (0);
@@ -482,7 +417,6 @@ nni_msgq_putback(nni_msgq *mq, nni_msg *msg)
 	}
 
 	nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
-	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	nni_mtx_unlock(&mq->mq_lock);
 
 	return (0);
@@ -528,7 +462,7 @@ nni_msgq_get_(nni_msgq *mq, nni_msg **msgp, nni_time expire, nni_signal *sig)
 		if (mq->mq_cap == 0) {
 			// If unbuffered, kick it since a writer would not
 			// block.
-			nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANPUT);
+			nni_cq_run(mq->mq_canput_cq, nni_msgq_cq_canput, mq);
 		}
 
 		rv = nni_cv_until(&mq->mq_readable, expire);
@@ -552,10 +486,8 @@ nni_msgq_get_(nni_msgq *mq, nni_msg **msgp, nni_time expire, nni_signal *sig)
 	}
 	if (mq->mq_len) {
 		nni_cq_run(mq->mq_canget_cq, nni_msgq_cq_canget, mq);
-		nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANGET);
 	}
 	nni_cq_run(mq->mq_canput_cq, nni_msgq_cq_canput, mq);
-	nni_msgq_kick(mq, NNI_MSGQ_NOTIFY_CANPUT);
 	nni_mtx_unlock(&mq->mq_lock);
 
 	return (0);
@@ -630,7 +562,6 @@ nni_msgq_drain(nni_msgq *mq, nni_time expire)
 	mq->mq_rwait = 0;
 	nni_cv_wake(&mq->mq_writeable);
 	nni_cv_wake(&mq->mq_readable);
-	nni_cv_wake(&mq->mq_notify_cv);
 	while (mq->mq_len > 0) {
 		if (nni_cv_until(&mq->mq_drained, expire) != 0) {
 			break;
@@ -646,6 +577,10 @@ nni_msgq_drain(nni_msgq *mq, nni_time expire)
 		nni_msg_free(msg);
 	}
 	nni_mtx_unlock(&mq->mq_lock);
+	nni_cq_close(mq->mq_canget_cq);
+	nni_cq_close(mq->mq_canput_cq);
+	nni_cq_close(mq->mq_get_cq);
+	nni_cq_close(mq->mq_put_cq);
 }
 
 
@@ -658,7 +593,6 @@ nni_msgq_close(nni_msgq *mq)
 	mq->mq_rwait = 0;
 	nni_cv_wake(&mq->mq_writeable);
 	nni_cv_wake(&mq->mq_readable);
-	nni_cv_wake(&mq->mq_notify_cv);
 
 	// Free the messages orphaned in the queue.
 	while (mq->mq_len > 0) {
@@ -670,6 +604,10 @@ nni_msgq_close(nni_msgq *mq)
 		nni_msg_free(msg);
 	}
 	nni_mtx_unlock(&mq->mq_lock);
+	nni_cq_close(mq->mq_canget_cq);
+	nni_cq_close(mq->mq_canput_cq);
+	nni_cq_close(mq->mq_get_cq);
+	nni_cq_close(mq->mq_put_cq);
 }
 
 

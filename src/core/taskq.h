@@ -17,7 +17,12 @@ struct nni_taskq_ent {
 	void *		tqe_arg;
 	nni_cb		tqe_cb;
 	nni_taskq *	tqe_tq;
+	int		tqe_flags;
 };
+
+#define NNI_TQE_SCHED		1
+#define NNI_TQE_RUN		2
+#define NNI_TQE_CANCEL		4
 
 extern int nni_taskq_init(nni_taskq **, int);
 extern void nni_taskq_fini(nni_taskq *);

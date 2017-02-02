@@ -57,11 +57,13 @@ struct nni_compl {
 
 extern void nni_cq_run(nni_cq *, int (*)(nni_compl *, void *), void *);
 extern int nni_cq_init(nni_cq **);
+extern void nni_cq_close(nni_cq *);
 extern void nni_cq_fini(nni_cq *);
 
 extern void nni_compl_cancel(nni_compl *);
 extern void nni_compl_submit(nni_compl *, nni_cq *, nni_time);
 extern void nni_compl_init(nni_compl *, int, nni_cb, void *);
+extern void nni_compl_fini(nni_compl *);
 extern void nni_compl_init_canput(nni_compl *, nni_msgq *, nni_cb, void *);
 extern void nni_compl_init_canget(nni_compl *, nni_msgq *, nni_cb, void *);
 

@@ -186,34 +186,6 @@ nni_reaper(void *arg)
 }
 
 
-static void
-nni_sock_urq_notify(nni_msgq *mq, int flags, void *arg)
-{
-	nni_sock *sock = arg;
-
-	if ((flags & NNI_MSGQ_NOTIFY_CANGET) == 0) {
-		return; // No interest in writability of read queue.
-	}
-	nni_mtx_lock(&sock->s_mx);
-	nni_ev_submit(&sock->s_recv_ev);
-	nni_mtx_unlock(&sock->s_mx);
-}
-
-
-static void
-nni_sock_uwq_notify(nni_msgq *mq, int flags, void *arg)
-{
-	nni_sock *sock = arg;
-
-	if ((flags & NNI_MSGQ_NOTIFY_CANPUT) == 0) {
-		return; // No interest in readability of write queue.
-	}
-	nni_mtx_lock(&sock->s_mx);
-	nni_ev_submit(&sock->s_send_ev);
-	nni_mtx_unlock(&sock->s_mx);
-}
-
-
 nni_mtx *
 nni_sock_mtx(nni_sock *sock)
 {
@@ -386,18 +358,6 @@ nni_sock_open(nni_sock **sockp, uint16_t pnum)
 		if (rv != 0) {
 			goto fail;
 		}
-	}
-
-	// XXX: This kills performance.  Look at moving this to
-	// be conditional - if nobody has callbacks because their code is
-	// also threaded, then we don't need to jump through these hoops.
-	rv = nni_msgq_notify(sock->s_urq, nni_sock_urq_notify, sock);
-	if (rv != 0) {
-		goto fail;
-	}
-	rv = nni_msgq_notify(sock->s_uwq, nni_sock_uwq_notify, sock);
-	if (rv != 0) {
-		goto fail;
 	}
 
 	for (i = 0; i < NNI_MAXWORKERS; i++) {

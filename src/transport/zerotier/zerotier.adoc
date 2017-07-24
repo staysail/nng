@@ -339,7 +339,10 @@ the `<ztid>` represents the 10-digit hexadecimal ZeroTier Device ID,
 and the `<port>` is the 16-bit port number previously described.
 
 // XXX: the ztid could use DNS names, generating 6PLANE IP addresses,
-// and extracting the 10 digit device id from that.
+// and extracting the 10 digit device id from that.  Note that there
+// is no good way to determine a nwid automatically.  The 6PLANE
+// address is determined by a non-reversible XOR transform of the
+// network id.
 
 Security Considerations
 ~~~~~~~~~~~~~~~~~~~~~~~

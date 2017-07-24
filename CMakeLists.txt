@@ -91,7 +91,8 @@ option (NNG_TESTS "Build and run tests" ON)
 option (NNG_TOOLS "Build extra tools" OFF)
 option (NNG_ENABLE_NNGCAT "Enable building nngcat utility." ${NNG_TOOLS})
 option (NNG_ENABLE_COVERAGE "Enable coverage reporting." OFF)
-
+option (NNG_ENABLE_ZEROTIER "Enable ZeroTier transport (requires libzt)." OFF)
+set (NNG_ZEROTIER_SOURCE "" CACHE PATH "Location of ZeroTier source tree.")
 # Enable access to private APIs for our own use.
 add_definitions (-DNNG_PRIVATE)
 
@@ -253,6 +254,25 @@ if (NNG_TESTS)
     add_subdirectory (perf)
 endif()
 
+# Search for ZeroTier
+# We use the libzerotiercore.a library, which is unfortunately a C++ object
+# even though it exposes only public C symbols.  It would be extremely
+# helpful if libzerotiercore didn't make us carry the whole C++ runtime
+# behind us.  The user must specify the location of the ZeroTier source
+# tree (dev branch for now, and already compiled please) by setting the
+# NNG_ZEROTIER_SOURCE macro.
+if (NNG_ENABLE_ZEROTIER)
+    find_library(NNG_LIBZTCORE zerotiercore PATHS ${NNG_ZEROTIER_SOURCE})
+    set(CMAKE_REQUIRED_INCLUDES ${NNG_ZEROTIER_SOURCE}/include)
+    set(CMAKE_REQUIRED_LIBRARIES ${NNG_LIBZTCORE} c++)
+    set(NNG_REQUIRED_LIBRARIES ${NNG_REQUIRED_LIBRARIES} ${NNG_LIBZTCORE})
+    nng_check_sym(ZT_Node_join ZeroTierOne.h NNG_HAVE_ZEROTIER)
+    if ((NOT NNG_HAVE_ZEROTIER))
+        message (FATAL_ERROR "Cannot find ZeroTier components")
+    endif()
+    message(STATUS "Found ZeroTier at ${NNG_LIBZTCORE}")
+endif()
+
 #  Build the tools
 
 if (NNG_ENABLE_NNGCAT)
@@ -269,6 +289,7 @@ if (NNG_ENABLE_DOC)
         message (STATUS "Using asciidoctor at ${ASCIIDOCTOR_EXE}")
     endif ()
 endif ()
+
 
 # Build the documenation
 if (NNG_ENABLE_DOC)

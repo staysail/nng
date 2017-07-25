@@ -26,7 +26,7 @@
 
 cmake_minimum_required (VERSION 3.1)
 
-project (nng C)
+project (nng)
 include (CheckFunctionExists)
 include (CheckSymbolExists)
 include (CheckStructHasMember)

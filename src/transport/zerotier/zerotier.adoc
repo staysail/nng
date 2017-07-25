@@ -352,3 +352,50 @@ addition to what ZeroTier does.
 
 
 
+ALTERNATE DESIGN
+================
+
+A proxy server sits in front.  It sets up associations with
+nng instances using a shared API over some kind of IPC.  (This could
+itself even be a nanomsg based service.)
+
+Messages we would need:
+
+BIND(NWID, local port) - (port 0 means choose a random one). gives back own identity.
+
+    struct bind_req {
+        uint64_t network_id;
+        uint16_t local_port;
+    }
+
+    struct bind_resp {
+        uint64_t local_address;
+        uint16_t local_port;
+    }
+
+SEND(remote addr) - sends remote addr
+
+    struct send_req {
+        uint64_t remote_addr;
+        uint16_t remote_port;
+        void *data;
+        size_t len;
+    }
+
+    struct send_resp {
+    }
+
+RECV() - get remote addr with packet
+
+    struct recv_req {
+    }
+
+    struct recv_resp {
+        uint64_t remote_addr;
+        uint16_t remote_port;
+        void *data;
+        size_t len;
+    }
+
+CLOSE()
+    -- no arguments

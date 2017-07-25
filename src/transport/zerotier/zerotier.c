@@ -8,11 +8,14 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
+#ifdef NNG_HAVE_ZEROTIER
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "core/nng_impl.h"
+
+#include <ZeroTierOne.h>
 
 // ZeroTier Transport.  This sits on the ZeroTier L2 network, which itself
 // is implemented on top of L3 (mostly UDP).  This requires the 3rd party
@@ -37,6 +40,82 @@
 //
 typedef struct nni_zt_pipe nni_zt_pipe;
 typedef struct nni_zt_ep   nni_zt_ep;
+
+// ZeroTier Node API callbacks
+static int
+nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
+    uint64_t netid, void **netptr, enum ZT_VirtualNetworkConfigOperation op,
+    const ZT_VirtualNetworkConfig *config)
+{
+	NNI_ARG_UNUSED(node);
+	NNI_ARG_UNUSED(userptr);
+	NNI_ARG_UNUSED(threadptr);
+	NNI_ARG_UNUSED(netid);
+	NNI_ARG_UNUSED(netptr);
+	NNI_ARG_UNUSED(op);
+	NNI_ARG_UNUSED(config);
+	// Maybe we don't have to create taps or anything like that.
+	// We do get our mac and MTUs from this, so there's that.
+	return (0);
+}
+
+// This function is called when a frame arrives on the *virtual*
+// network.
+static void
+nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
+    uint64_t netid, void **netptr, uint64_t srcmac, uint64_t dstmac,
+    unsigned int ethertype, unsigned int vlanid, const void *data,
+    unsigned int len)
+{
+}
+
+static void
+nni_zt_event_cb(ZT_Node *node, void *userptr, void *threadptr,
+    enum ZT_Event event, const void *payload)
+{
+}
+
+static void
+nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
+    enum ZT_StateObjectType objtype, const uint64_t objid[2], const void *data,
+    int len)
+{
+}
+
+static int
+nni_zt_state_get(ZT_Node *node, void *uptr, void *threadptr,
+    enum ZT_StateObjectType objtype, const uint64_t objid[2], void *data,
+    unsigned int len)
+{
+	return (-1);
+}
+
+// This function is called when ZeroTier desires to send a physical frame.
+// The data is a UDP payload, the rest of the payload should be set over
+// vanilla UDP.
+static int
+nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
+    int64_t socket, const struct sockaddr_storage *remaddr, const void *data,
+    unsigned int len, unsigned int ttl)
+{
+	// Early dev... dropping all frames on the floor.  I wonder how
+	// ZeroTier handles non-zero returns...
+	return (0);
+}
+
+static struct ZT_Node_Callbacks nni_zt_callbacks = {
+	.version                      = 0,
+	.statePutFunction             = nni_zt_state_put,
+	.stateGetFunction             = nni_zt_state_get,
+	.wirePacketSendFunction       = nni_zt_wire_packet_send,
+	.virtualNetworkFrameFunction  = nni_zt_virtual_network_frame,
+	.virtualNetworkConfigFunction = nni_zt_virtual_network_config,
+	.eventCallback                = nni_zt_event_cb,
+	.pathCheckFunction            = NULL,
+	.pathLookupFunction           = NULL,
+};
+
+static ZT_Node *nni_zt_node;
 
 struct nni_zt_pipe {
 	const char *addr;
@@ -69,18 +148,53 @@ struct nni_zt_ep {
 };
 
 static int
+nni_zt_result(enum ZT_ResultCode rv)
+{
+	switch (rv) {
+	case ZT_RESULT_OK:
+		return (0);
+	case ZT_RESULT_OK_IGNORED:
+		return (0);
+	case ZT_RESULT_FATAL_ERROR_OUT_OF_MEMORY:
+		return (NNG_ENOMEM);
+	case ZT_RESULT_FATAL_ERROR_DATA_STORE_FAILED:
+		return (NNG_EPERM);
+	case ZT_RESULT_FATAL_ERROR_INTERNAL:
+		return (NNG_EINTERNAL);
+	case ZT_RESULT_ERROR_NETWORK_NOT_FOUND:
+		return (NNG_EADDRINVAL);
+	case ZT_RESULT_ERROR_UNSUPPORTED_OPERATION:
+		return (NNG_ENOTSUP);
+	case ZT_RESULT_ERROR_BAD_PARAMETER:
+		return (NNG_EINVAL);
+	default:
+		return (NNG_ETRANERR + (int) rv);
+	}
+}
+static int
 nni_zt_tran_init(void)
 {
+	enum ZT_ResultCode ztrv;
 	// XXX: This needs to set up the initial global listener.  It
 	// quite likely shouldn't actually start listening yet, but
 	// everything should be ready for when the first endpoint listen
-	// comes in.
+	// comes in.  XXX: What values to use for USERPTR?  Maybe we just
+	// do not care.
+	ztrv = ZT_Node_new(
+	    &nni_zt_node, NULL, NULL, &nni_zt_callbacks, nni_clock());
+	if (ztrv != 0) {
+		return (nni_zt_result(ztrv));
+	}
 	return (NNG_ENOTSUP);
 }
 
 static void
 nni_zt_tran_fini(void)
 {
+	if (nni_zt_node != NULL) {
+		ZT_Node_delete(nni_zt_node);
+		nni_zt_node = NULL;
+	}
 }
 
 static void
@@ -206,3 +320,7 @@ struct nni_tran nni_zt_tran = {
 	.tran_init   = nni_zt_tran_init,
 	.tran_fini   = nni_zt_tran_fini,
 };
+
+#else
+int nni_zerotier_not_used = 0;
+#endif

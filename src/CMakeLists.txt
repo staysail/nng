@@ -99,6 +99,8 @@ set (NNG_SOURCES
     transport/ipc/ipc.c
 
     transport/tcp/tcp.c
+
+    transport/zerotier/zerotier.c
 )
 
 if (NNG_PLATFORM_POSIX)
@@ -140,7 +142,8 @@ if (NNG_PLATFORM_WINDOWS)
     )
 endif()
 
-include_directories(AFTER SYSTEM ${PROJECT_SOURCE_DIR}/src)
+include_directories(AFTER SYSTEM ${PROJECT_SOURCE_DIR}/src
+    ${NNG_REQUIRED_INCLUDES})
 
 # Provide same folder structure in IDE as on disk
 foreach (f ${NNG_SOURCES})

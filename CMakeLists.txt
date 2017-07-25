@@ -1,4 +1,6 @@
 #
+#   Copyright 2017 Garrett D'Amore <garrett@damore.org>
+#   Copyright 2017 Capitar IT Group BV <info@capitar.com>
 #   Copyright (c) 2012 Martin Sustrik  All rights reserved.
 #   Copyright (c) 2013 GoPivotal, Inc.  All rights reserved.
 #   Copyright (c) 2015-2016 Jack R. Dunaway. All rights reserved.
@@ -265,13 +267,24 @@ if (NNG_ENABLE_ZEROTIER)
     find_library(NNG_LIBZTCORE zerotiercore PATHS ${NNG_ZEROTIER_SOURCE})
     set(CMAKE_REQUIRED_INCLUDES ${NNG_ZEROTIER_SOURCE}/include)
     set(CMAKE_REQUIRED_LIBRARIES ${NNG_LIBZTCORE} c++)
-    set(NNG_REQUIRED_LIBRARIES ${NNG_REQUIRED_LIBRARIES} ${NNG_LIBZTCORE})
+    set(NNG_REQUIRED_LIBRARIES ${NNG_REQUIRED_LIBRARIES} ${NNG_LIBZTCORE} c++)
+    set(NNG_REQUIRED_INCLUDES ${NNG_REQUIRED_INCLUDES} ${NNG_ZEROTIER_SOURCE}/include)
     nng_check_sym(ZT_Node_join ZeroTierOne.h NNG_HAVE_ZEROTIER)
     if ((NOT NNG_HAVE_ZEROTIER))
         message (FATAL_ERROR "Cannot find ZeroTier components")
     endif()
     message(STATUS "Found ZeroTier at ${NNG_LIBZTCORE}")
 endif()
+
+add_subdirectory (src)
+
+if (NNG_TESTS)
+	enable_testing()
+	set(all_tests, "")
+	add_subdirectory (tests)
+    add_subdirectory (perf)
+endif()
+
 
 #  Build the tools
 

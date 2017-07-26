@@ -35,6 +35,10 @@ set(LIBZT_INC "/Users/garrett/Projects/ZeroTierSDK/include")
 set(NNZTAGENT_SRCS
         nnztagent_getopt.hpp
         nnztagent_main.cpp
+        nnztagent_sha3.c
+        nnztagent_sha3.h
+        nnztagent_utils.c
+        nnztagent_utils.h
 )
 
 # NB: I'm using my personal github repo because the upstream is busted at
@@ -64,3 +68,5 @@ else()
 endif()
 
 add_executable(nnztagent ${NNZTAGENT_SRCS})
+target_link_libraries (nnztagent ${PROJECT_NAME}_static)
+target_link_libraries(nnztagent ${NNG_REQUIRED_LIBRARIES})

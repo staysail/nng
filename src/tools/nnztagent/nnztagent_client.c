@@ -17,6 +17,8 @@
 
 #include "nng_impl.h"
 #include "nnztagent.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 struct nnzt_agent {
 

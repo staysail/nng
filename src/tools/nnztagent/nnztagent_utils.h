@@ -12,7 +12,7 @@
 #define NNZTAGENT_UTILS_H_
 
 #ifdef __cplusplus
-#extern "C" {
+extern "C" {
 #endif
 
 extern void nnzt_agent_homedir(char *homedir, int size);

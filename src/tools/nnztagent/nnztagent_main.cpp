@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "nnztagent_utils.h"
+
 #include "nnztagent_getopt.hpp"
 
 int
@@ -54,6 +56,13 @@ main(int argc, char *argv[])
 
 	for (auto s : opts.Arguments()) {
 		std::cout << "Trailing argument: '" << s << "'" << std::endl;
+	}
+
+	// If we were not given a home directory, get a default one.
+	if (homedir == "") {
+		char hdir[256];
+		nnzt_agent_homedir(hdir, sizeof(hdir));
+		homedir = hdir;
 	}
 
 	std::cout << "Home: " << homedir << std::endl;

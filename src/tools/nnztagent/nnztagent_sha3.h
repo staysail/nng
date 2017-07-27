@@ -12,7 +12,7 @@
 #define NNZTAGENT_SHA3_H_
 
 #ifdef __cplusplus
-#extern "C" {
+extern "C" {
 #endif
 
 extern void nnzt_agent_sha3_256(const char *, size_t, char *);

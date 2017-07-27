@@ -32,31 +32,6 @@ struct nnzt_agent {
 	char homedir[256];
 };
 
-static void
-nnzt_agent_homedir(char *homedir, int size)
-{
-	char *home;
-
-	// Always honor the NNZTAGENTHOME first.  No underscores for
-	// maximum portability.
-	if ((home = getenv("NNZTAGENTHOME")) != NULL) {
-		(void) snprintf(homedir, size, "%s", home);
-		return;
-	}
-
-#ifdef _WIN32
-	(void) snprintf(homedir, size, "%s%s/.nnztagent", getenv("HOMEDRIVE"),
-	    getenv("HOMEPATH"));
-#else
-	// HOME is required by POSIX.
-	if ((home = getenv("HOME")) != NULL) {
-		(void) snprintf(homedir, size, "%s/.nnztagent", home);
-		return;
-	}
-	(void) snprintf(homedir, size, "/.nnztagent");
-#endif
-}
-
 // We only support connecting to looopback or IPC addresses; others are
 // subject to observation or tampering or both.
 #define TCP4_LOOP "tcp://127.0.0.1:"

@@ -8,9 +8,13 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
+#ifndef _WIN32
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "core/nng_impl.h"
 
@@ -26,68 +30,61 @@ nnzt_agent_homedir(char *homedir, int size)
 		return;
 	}
 
-#ifdef _WIN32
-	(void) snprintf(homedir, size, "%s%s/.nnztagent", getenv("HOMEDRIVE"),
-	    getenv("HOMEPATH"));
-#else
 	// HOME is required by POSIX.
 	if ((home = getenv("HOME")) != NULL) {
 		(void) snprintf(homedir, size, "%s/.nnztagent", home);
 		return;
 	}
 	(void) snprintf(homedir, size, "/.nnztagent");
-#endif
 }
 
 int
-nnzt_agent_get_file(const char *path, char **data, int *size)
+nnzt_agent_get_file(const char *path, char **datap, int *sizep)
 {
-	FILE *f;
-	char *buf;
-	int   sz;
+	char *      buf;
+	int         sz;
+	int         fd;
+	int         rv;
+	int         n;
+	struct stat st;
 
-	if ((f = fopen(path, "rb")) == NULL) {
-		// This could be EPERM too...
-		switch (errno) {
-		case ENOENT:
-			return (NNG_ENOENT);
-		case ENOMEM:
-			return (NNG_ENOMEM);
-		case EPERM:
-			return (NNG_EPERM);
-		default:
-			return (NNG_ESYSERR + errno);
-		}
+	if ((fd = open(path, O_RDONLY)) < 0) {
+		return (nni_plat_errno(errno));
 	}
 
-	// NB: We are kind of assuming that the files we are interested
-	// in are small!  If a long won't hold the size, you don't want
-	// this anyway.
-	if (fseek(f, 0L, SEEK_END) < 0) {
-		(void) fclose(f);
-		return (NNG_ESYSERR + errno);
+	if (fstat(fd, &st) < 0) {
+		rv = errno;
+		(void) close(fd);
+		return (nni_plat_errno(rv));
 	}
-	sz = (int) ftell(f);
 
-	// If its bigger than 2 MB, we reject it.
-	if (sz > 1U << 21) {
-		(void) fclose(f);
+	// 2MB limit - there is no reason for any key file to be larger
+	// than this.
+	if ((sz = st.st_size) > (1U << 21)) {
+		(void) close(fd);
 		return (NNG_EMSGSIZE);
 	}
 
 	if ((buf = nni_alloc(sz)) == NULL) {
-		(void) fclose(f);
+		(void) close(fd);
 		return (NNG_ENOMEM);
 	}
-	if (fread(buf, 1, sz, f) != sz) {
-		(void) fclose(f);
-		nni_free(buf, sz);
-		return (NNG_EMSGSIZE);
-	}
-	(void) fclose(f);
+	*sizep = sz;
+	*datap = buf;
 
-	*data = buf;
-	*size = sz;
+	while (sz > 0) {
+		if ((n = read(fd, buf, sz)) < 0) {
+			rv = errno;
+			(void) close(fd);
+			free(buf);
+			*sizep = 0;
+			*datap = NULL;
+			return (nni_plat_errno(rv));
+		}
+		sz -= n;
+		buf += n;
+	}
+	(void) close(fd);
 	return (0);
 }
 
@@ -95,32 +92,46 @@ int
 nnzt_agent_put_file(const char *path, char *data, int size)
 {
 	// Use with caution -- this will overwrite any existing file.
-	FILE *f;
+	FILE * f;
+	int    rv;
+	int    fd;
+	int    n;
+	mode_t mode = S_IRUSR | S_IWUSR; // mode 0600
 
-	if ((f = fopen(path, "wb")) == NULL) {
-		switch (errno) {
-		case ENOENT:
-			return (NNG_ENOENT);
-		case EEXIST:
-			return (NNG_EBUSY);
-		case ENOMEM:
-			return (NNG_ENOMEM);
-		case EPERM:
-			return (NNG_EPERM);
-		default:
-			return (NNG_ESYSERR + errno);
+	rv = 0;
+	if ((fd = open(path, O_CREAT | O_EXCL | O_WRONLY, mode)) < 0) {
+		return (nni_plat_errno(errno));
+	}
+
+	while (size > 0) {
+		if ((n = write(fd, data, size)) < 0) {
+			rv = nni_plat_errno(rv);
+			(void) close(fd);
+			return (nni_plat_errno(rv));
 		}
+		size -= n;
+		data += n;
 	}
-	if (fwrite(data, 1, size, f) != size) {
-		(void) fclose(f);
-		return (NNG_ESYSERR + errno);
+	NNI_ASSERT(size == 0);
+
+	if (close(fd) < 0) {
+		return (nni_plat_errno(errno));
 	}
-	(void) fclose(f);
 	return (0);
 }
 
-// We only support connecting to looopback or IPC addresses; others are
-// subject to observation or tampering or both.
-#define TCP4_LOOP "tcp://127.0.0.1:"
-#define TCP6_LOOP "tcp://::1:"
-#define IPC_ADDR "ipc://"
+int
+nnzt_agent_mkhome(const char *homedir)
+{
+	int rv;
+	if (mkdir(homedir, S_IRUSR | S_IWUSR | S_IXUSR) < 0) {
+		if ((rv = errno) == EEXIST) {
+			// Already exists!  This is good.
+			return (0);
+		}
+		return (nni_plat_errno(rv));
+	}
+	return (0);
+}
+
+#endif // _WIN32

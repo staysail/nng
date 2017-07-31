@@ -65,6 +65,10 @@ main(int argc, char *argv[])
 		homedir = hdir;
 	}
 
+	if (keyfile == "") {
+		keyfile = homedir + "/agentkey";
+	}
+
 	std::cout << "Home: " << homedir << std::endl;
 	std::cout << "KeyFile: " << keyfile << std::endl;
 	std::cout << "URL: " << url << std::endl;

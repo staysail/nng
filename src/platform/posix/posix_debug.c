@@ -81,6 +81,11 @@ static struct {
 #endif
 	{ ETIMEDOUT,	   NNG_ETIMEDOUT    },
 	{ EWOULDBLOCK,	   NNG_EAGAIN	    },
+	{ ENOSPC,	   NNG_ENOSPC	    },
+	{ EFBIG,	   NNG_ENOSPC	    },
+	{ EDQUOT,	   NNG_ENOSPC	    },
+	{ ENFILE,	   NNG_ENOFILES	    },
+	{ EMFILE,	   NNG_ENOFILES	    },
 	// must be last
 	{		0,		  0 },
 	// clang-format on

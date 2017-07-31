@@ -436,6 +436,18 @@ nng_strerror(int num)
 
 	case NNG_ECANCELED:
 		return ("Operation canceled");
+
+	case NNG_ENOFILES:
+		return ("Out of files");
+
+	case NNG_ENOSPC:
+		return ("Out of space");
+
+	case NNG_EEXIST:
+		return ("Resource already exists");
+
+	case NNG_EINTERNAL:
+		return ("Internal error detected");
 	}
 
 	if (num & NNG_ESYSERR) {

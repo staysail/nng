@@ -18,6 +18,7 @@ extern "C" {
 extern void nnzt_agent_homedir(char *homedir, int size);
 extern int nnzt_agent_get_file(const char *path, char **data, int *size);
 extern int nnzt_agent_put_file(const char *path, char *data, int size);
+extern uint64_t nnzt_agent_random(void);
 
 #ifdef __cplusplus
 }

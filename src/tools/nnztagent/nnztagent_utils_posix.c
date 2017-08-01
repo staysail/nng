@@ -134,4 +134,42 @@ nnzt_agent_mkhome(const char *homedir)
 	return (0);
 }
 
+uint64_t
+nnzt_agent_random(void)
+{
+	uint64_t val;
+#if defined(NNG_USE_GETRANDOM)
+	// Latest Linux has a nice API here.
+	(void) getrandom(&val, sizeof(val), 0);
+#elif defined(NNG_USE_GETENTROPY)
+	// Modern BSD systems prefer this, but can only generate 256 bytes
+	(void) getentropy(&val, sizeof(val));
+#elif defined(NNG_USE_ARC4RANDOM)
+	// This uses BSD style pRNG seeded from the kernel in libc.
+	(void) arc4random_buf(&val, sizeof(val));
+#elif defined(NNG_USE_DEVURANDOM)
+	// The historic /dev/urandom device.  This is not as a good as
+	// a system call, since file descriptor attacks are possible,
+	// and it may need special permissions.  We choose /dev/urandom
+	// over /dev/random to avoid diminishing the system entropy.
+	int fd;
+
+	if ((fd = open("/dev/urandom", O_RDONLY)) >= 0) {
+		(void) read(fd, &val, sizeof(val));
+		(void) close(fd);
+	}
+#endif
+
+	// Let's mixin a few other things...  There are a lot of other
+	// things we could mix in depending on the platform, but we're
+	// really hoping we already got reasonable random data this far.
+	val ^= time(NULL);
+	val ^= getpid();
+	val ^= getuid();
+	val ^= (uint64_t)(time(NULL)); // Mix up the high order bits too
+	val ^= (uintptr_t) &val;       // Take advantage of ASLR if in use!
+
+	return (val);
+}
+
 #endif // PLATFORM_POSIX

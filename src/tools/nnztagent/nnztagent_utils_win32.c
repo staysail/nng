@@ -138,4 +138,19 @@ nnzt_agent_mkhome(const char *homedir)
 	return (0);
 }
 
+uint64_t
+nnzt_agent_random(void)
+{
+	DWORD    r;
+	uint64_t val;
+	// rand_s is supposed to be "strong"
+	rand_s(&r);
+	val = r;
+	val <<= 32;
+	rand_s(&r);
+	val |= r;
+
+	return (val);
+}
+
 #endif // PLATFORM_WINDOWS

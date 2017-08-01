@@ -87,6 +87,11 @@ wrapping if necessary) from the one prior.
 
 Following the header is the payload, which varies by request type.
 
+
+XXX... maybe we can use PAIR protocol for this?  Would be easier to
+use an SP socket.  Then agent could probably just be moved out of the
+tree altogether...  This would allow mangos to use this agent too.
+
 ZeroTier Methods
 ================
 

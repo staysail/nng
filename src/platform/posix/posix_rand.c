@@ -53,7 +53,7 @@ nni_plat_seed_prng(void *buf, size_t bufsz)
 	(void) getrandom(buf, bufsz, 0);
 #elif defined(NNG_USE_GETENTROPY)
 	// Modern BSD systems prefer this, but can only generate 256 bytes
-	(void) getentropy(buf, bufsz > 256 ? 256 : 0);
+	(void) getentropy(buf, bufsz > 256 ? 256 : bufsz);
 #elif defined(NNG_USE_ARC4RANDOM)
 	// This uses BSD style pRNG seeded from the kernel in libc.
 	(void) arc4random_buf(buf, bufsz);

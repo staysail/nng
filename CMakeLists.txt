@@ -100,12 +100,14 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     find_package (Threads REQUIRED)
     add_definitions (-DPLATFORM_POSIX)
     add_definitions (-DNNG_USE_EVENTFD)
+    set(NNG_PLATFORM_POSIX 1)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "Darwin")
     find_package (Threads REQUIRED)
     add_definitions (-DPLATFORM_POSIX)
     # macOS 10.12 and later have getentropy, but the older releases
     # have ARC4_RANDOM, and that is sufficient to our needs.
+    set(NNG_PLATFORM_POSIX 1)
     add_definitions (-DNNG_USE_ARC4_RANDOM)
 
     # macOS added some of CLOCK_MONOTONIC, but the implementation is
@@ -114,18 +116,22 @@ elseif (CMAKE_SYSTEM_NAME MATCHES "Darwin")
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
     find_package (Threads REQUIRED)
+    set(NNG_PLATFORM_POSIX 1)
     add_definitions (-DPLATFORM_POSIX)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "NetBSD")
     find_package (Threads REQUIRED)
+    set(NNG_PLATFORM_POSIX 1)
     add_definitions (-DPLATFORM_POSIX)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
     find_package (Threads REQUIRED)
+    set(NNG_PLATFORM_POSIX 1)
     add_definitions (-DPLATFORM_POSIX)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "SunOS")
     find_package (Threads REQUIRED)
+    set(NNG_PLATFORM_POSIX 1)
     add_definitions (-DPLATFORM_POSIX)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -136,6 +142,7 @@ elseif (CMAKE_SYSTEM_NAME MATCHES "Windows")
     # Target Windows Vista and later
     add_definitions (-D_WIN32_WINNT=0x0600)
     list (APPEND CMAKE_REQUIRED_DEFINITIONS -D_WIN32_WINNT=0x0600)
+    set(NNG_PLATFORM_WINDOWS 1)
 
 else ()
     message (AUTHOR_WARNING "WARNING: This platform may not be supported: ${CMAKE_SYSTEM_NAME}")

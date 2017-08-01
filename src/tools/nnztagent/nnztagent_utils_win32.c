@@ -8,11 +8,11 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
+#ifdef PLATFORM_WINDOWS
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifdef _WIN32
 #include <direct.h>
 
 #include "core/nng_impl.h"
@@ -36,10 +36,14 @@ nnzt_agent_homedir(char *homedir, int size)
 int
 nnzt_agent_get_file(const char *path, char **data, int *size)
 {
-	FILE * f;
-	char * buf;
-	int    sz;
-	HANDLE h;
+	FILE *             f;
+	char *             buf;
+	LARGE_INTEGER      sz64;
+	DWORD              sz;
+	DWORD              nread;
+	HANDLE             h;
+	int                rv;
+	FILE_STANDARD_INFO info;
 
 	// Note that we assume the default security descriptor for the user
 	// only grants access to that user.  We could perhaps enforce this
@@ -49,53 +53,44 @@ nnzt_agent_get_file(const char *path, char **data, int *size)
 	    OPEN_EXISTING, FILE_FLAG_NORMAL, NULL);
 
 	if (h == INVALID_HANDLE_VALUE) {
-		int err;
-		switch ((err = GetLastError())) {
-		case ERROR_ACCESS_DENIED:
-		case ERROR_SHARING_VIOLATION:
-		case ERROR_LOCK_VIOLATION:
-			return (NNG_EPERM);
-		case ERROR_FILE_NOT_FOUND:
-		case ERROR_PATH_NOT_FOUND:
-			return (NNG_ENOENT);
-		case ERROR_NOT_ENOUGH_MEMORY:
-		case ERROR_OUTOFMEMORY:
-			return (NNG_ENOMEM);
-		case ERROR_TOO_MANY_OPEN_FILES:
-		// XXX we want an NNG_ERR for this
-		default:
-			return (NNG_ESYSERR + err);
-		}
+		return (nni_win_error(GetLastError()));
 	}
 
-	// XXX: ReadFile...
-	// XXX: CloseHandle ...
-
-	// NB: We are kind of assuming that the files we are interested
-	// in are small!  If a long won't hold the size, you don't want
-	// this anyway.
-	if (fseek(f, 0L, SEEK_END) < 0) {
-		(void) fclose(f);
-		return (NNG_ESYSERR + errno);
+	// NB: Simpler GetFileSizeEx is not supported for Windows store apps.
+	if (GetFileInformationByHandleEx(
+	        h, FileStandardInfo, &info, sizeof(nfo)) != 0) {
+		rv = GetLastError();
+		CloseHandle(h);
+		return (nni_win_error(rv));
 	}
-	sz = (int) ftell(f);
 
-	// If its bigger than 2 MB, we reject it.
-	if (sz > 1U << 21) {
-		(void) fclose(f);
+	// File too large (2MB)?
+	if (info.AllocationSize.QuadPart > (1U << 21)) {
+		CloseHandle(h);
 		return (NNG_EMSGSIZE);
 	}
+	sz = info.AllocationSize.LowPart;
 
 	if ((buf = nni_alloc(sz)) == NULL) {
-		(void) fclose(f);
+		CloseHandle(h);
 		return (NNG_ENOMEM);
 	}
-	if (fread(buf, 1, sz, f) != sz) {
-		(void) fclose(f);
+
+	if (ReadFile(h, buf, sz, &nread, NULL) != 0) {
+		rv = GetLastError();
+		CloseHandle(h);
 		nni_free(buf, sz);
-		return (NNG_EMSGSIZE);
+		return (nni_win_error(rv));
 	}
-	(void) fclose(f);
+
+	if (nread != sz) {
+		CloseHandle(h);
+		nni_free(buf, sz);
+		// This should not happen -- the file got truncated!
+		return (NNG_EINTERNAL);
+	}
+
+	(void) CloseHandle(h);
 
 	*data = buf;
 	*size = sz;
@@ -143,4 +138,4 @@ nnzt_agent_mkhome(const char *homedir)
 	return (0);
 }
 
-#endif
+#endif // PLATFORM_WINDOWS

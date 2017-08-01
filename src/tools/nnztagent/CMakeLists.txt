@@ -32,13 +32,22 @@ endif()
 set(LIBZT "/Users/garrett/Projects/ZeroTierSDK/build/darwin/libzt.a")
 set(LIBZT_INC "/Users/garrett/Projects/ZeroTierSDK/include")
 
-set(NNZTAGENT_SRCS
+if (NNG_PLATFORM_WINDOWS)
+    set(NNZTAGENT_PLATFORM_SOURCES nnztagent_utils_win32.c)
+elseif (NNG_PLATFORM_POSIX)
+    set(NNZTAGENT_PLATFORM_SOURCES nnztagent_utils_posix.c)
+else()
+    message(FATAL_ERROR "Unsupported platform for building the nnztagent!")
+endif()
+
+set(NNZTAGENT_SOURCES
         nnztagent_getopt.hpp
         nnztagent_main.cpp
         nnztagent_sha3.c
         nnztagent_sha3.h
-        nnztagent_utils.c
         nnztagent_utils.h
+
+        ${NNZTAGENT_PLATFORM_SOURCES}
 )
 
 # NB: I'm using my personal github repo because the upstream is busted at
@@ -67,6 +76,6 @@ else()
     set(CMAKE_CXX_EXTENSIONS off)
 endif()
 
-add_executable(nnztagent ${NNZTAGENT_SRCS})
+add_executable(nnztagent ${NNZTAGENT_SOURCES})
 target_link_libraries (nnztagent ${PROJECT_NAME}_static)
 target_link_libraries(nnztagent ${NNG_REQUIRED_LIBRARIES})

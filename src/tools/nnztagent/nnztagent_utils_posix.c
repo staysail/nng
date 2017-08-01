@@ -8,7 +8,7 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#ifndef _WIN32
+#ifdef PLATFORM_POSIX
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -134,4 +134,4 @@ nnzt_agent_mkhome(const char *homedir)
 	return (0);
 }
 
-#endif // _WIN32
+#endif // PLATFORM_POSIX

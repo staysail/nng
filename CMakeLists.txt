@@ -93,7 +93,7 @@ option (NNG_TESTS "Build and run tests" ON)
 option (NNG_TOOLS "Build extra tools" OFF)
 option (NNG_ENABLE_NNGCAT "Enable building nngcat utility." ${NNG_TOOLS})
 option (NNG_ENABLE_COVERAGE "Enable coverage reporting." OFF)
-option (NNG_ENABLE_ZEROTIER "Enable ZeroTier transport (requires libzt)." OFF)
+option (NNG_ENABLE_ZEROTIER "Enable ZeroTier transport (requires libzerotiercore)." OFF)
 set (NNG_ZEROTIER_SOURCE "" CACHE PATH "Location of ZeroTier source tree.")
 # Enable access to private APIs for our own use.
 add_definitions (-DNNG_PRIVATE)
@@ -263,6 +263,13 @@ endif()
 # behind us.  The user must specify the location of the ZeroTier source
 # tree (dev branch for now, and already compiled please) by setting the
 # NNG_ZEROTIER_SOURCE macro.
+# NB: This needs to be the zerotierone tree, not the libzt library.
+# This is because we don't access the API, but instead use the low
+# level zerotiercore functionality directly.
+# NB: As we wind up linking libzerotiercore.a into the application,
+# this means that your application will *also* need to either be licensed
+# under the GPLv3, or you will need to have a commercial license from
+# ZeroTier permitting its use elsewhere.
 if (NNG_ENABLE_ZEROTIER)
     find_library(NNG_LIBZTCORE zerotiercore PATHS ${NNG_ZEROTIER_SOURCE})
     set(CMAKE_REQUIRED_INCLUDES ${NNG_ZEROTIER_SOURCE}/include)

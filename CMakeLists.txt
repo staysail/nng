@@ -249,13 +249,6 @@ nng_check_sym (strnlen string.h NNG_HAVE_STRNLEN)
 
 add_subdirectory (src)
 
-if (NNG_TESTS)
-	enable_testing()
-	set(all_tests, "")
-	add_subdirectory (tests)
-    add_subdirectory (perf)
-endif()
-
 # Search for ZeroTier
 # We use the libzerotiercore.a library, which is unfortunately a C++ object
 # even though it exposes only public C symbols.  It would be extremely
@@ -282,8 +275,6 @@ if (NNG_ENABLE_ZEROTIER)
     endif()
     message(STATUS "Found ZeroTier at ${NNG_LIBZTCORE}")
 endif()
-
-add_subdirectory (src)
 
 if (NNG_TESTS)
 	enable_testing()

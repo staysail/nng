@@ -247,8 +247,6 @@ nng_check_sym (strlcat string.h NNG_HAVE_STRLCAT)
 nng_check_sym (strlcpy string.h NNG_HAVE_STRLCPY)
 nng_check_sym (strnlen string.h NNG_HAVE_STRNLEN)
 
-add_subdirectory (src)
-
 # Search for ZeroTier
 # We use the libzerotiercore.a library, which is unfortunately a C++ object
 # even though it exposes only public C symbols.  It would be extremely
@@ -265,16 +263,20 @@ add_subdirectory (src)
 # ZeroTier permitting its use elsewhere.
 if (NNG_ENABLE_ZEROTIER)
     find_library(NNG_LIBZTCORE zerotiercore PATHS ${NNG_ZEROTIER_SOURCE})
-    set(CMAKE_REQUIRED_INCLUDES ${NNG_ZEROTIER_SOURCE}/include)
-    set(CMAKE_REQUIRED_LIBRARIES ${NNG_LIBZTCORE} c++)
-    set(NNG_REQUIRED_LIBRARIES ${NNG_REQUIRED_LIBRARIES} ${NNG_LIBZTCORE} c++)
-    set(NNG_REQUIRED_INCLUDES ${NNG_REQUIRED_INCLUDES} ${NNG_ZEROTIER_SOURCE}/include)
-    nng_check_sym(ZT_Node_join ZeroTierOne.h NNG_HAVE_ZEROTIER)
-    if ((NOT NNG_HAVE_ZEROTIER))
+    if (NNG_LIBZTCORE)
+        set(CMAKE_REQUIRED_INCLUDES ${NNG_ZEROTIER_SOURCE}/include)
+        set(CMAKE_REQUIRED_LIBRARIES ${NNG_LIBZTCORE} c++)
+        set(NNG_REQUIRED_LIBRARIES ${NNG_REQUIRED_LIBRARIES} ${NNG_LIBZTCORE} c++)
+        set(NNG_REQUIRED_INCLUDES ${NNG_REQUIRED_INCLUDES} ${NNG_ZEROTIER_SOURCE}/include)
+        nng_check_sym(ZT_Node_join ZeroTierOne.h NNG_HAVE_ZEROTIER)
+    endif()
+    if (NOT NNG_HAVE_ZEROTIER)
         message (FATAL_ERROR "Cannot find ZeroTier components")
     endif()
     message(STATUS "Found ZeroTier at ${NNG_LIBZTCORE}")
 endif()
+
+add_subdirectory (src)
 
 if (NNG_TESTS)
 	enable_testing()

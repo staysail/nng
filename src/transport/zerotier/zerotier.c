@@ -58,44 +58,49 @@ struct nni_zt_node {
 	ZT_Node *     zn_znode;
 	nni_list_node zn_link;
 	int           zn_refcnt;
+	int           zn_closed;
 	nni_list      zn_eps;
 	nni_list      zn_pipes;
+	nni_plat_udp *zn_udp;
+	nni_aio       zn_rcv_aio;
+	nni_aio       zn_snd_aio;
+	nni_mtx       zn_lk;
 };
 
 struct nni_zt_pipe {
-	nni_list_node znode_link;
-	const char *  addr;
-	uint16_t      peer;
-	uint16_t      proto;
-	size_t        rcvmax;
-	nni_aio *     user_txaio;
-	nni_aio *     user_rxaio;
-	nni_aio *     user_negaio;
+	nni_list_node zp_link;
+	const char *  zp_addr;
+	uint16_t      zp_peer;
+	uint16_t      zp_proto;
+	size_t        zp_rcvmax;
+	nni_aio *     zp_user_txaio;
+	nni_aio *     zp_user_rxaio;
+	nni_aio *     zp_user_negaio;
 
 	// XXX: fraglist
-	nni_sockaddr remaddr;
-	nni_sockaddr locaddr;
+	nni_sockaddr zp_remaddr;
+	nni_sockaddr zp_locaddr;
 
-	nni_aio  txaio;
-	nni_aio  rxaio;
-	nni_msg *rxmsg;
-	nni_mtx  mtx;
+	nni_aio  zp_txaio;
+	nni_aio  zp_rxaio;
+	nni_msg *zp_rxmsg;
+	nni_mtx  zp_lk;
 };
 
 struct nni_zt_ep {
-	nni_list_node znode_link;
-	char          url[NNG_MAXADDRLEN + 1];
-	char          home[NNG_MAXADDRLEN + 1]; // should be enough
-	ZT_Node *     ztnode;
-	uint64_t      nwid;
-	int           mode;
-	nni_sockaddr  locaddr;
-	int           closed;
-	uint16_t      proto;
-	size_t        rcvmax;
-	nni_aio       aio;
-	nni_aio *     user_aio;
-	nni_mtx       mtx;
+	nni_list_node ze_link;
+	char          ze_url[NNG_MAXADDRLEN + 1];
+	char          ze_home[NNG_MAXADDRLEN + 1]; // should be enough
+	ZT_Node *     ze_ztnode;
+	uint64_t      ze_nwid;
+	int           ze_mode;
+	nni_sockaddr  ze_locaddr;
+	int           ze_closed;
+	uint16_t      ze_proto;
+	size_t        ze_rcvmax;
+	nni_aio       ze_aio;
+	nni_aio *     ze_user_aio;
+	nni_mtx       ze_lk;
 };
 
 static nni_mtx  nni_zt_lk;
@@ -277,8 +282,50 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
     int64_t socket, const struct sockaddr_storage *remaddr, const void *data,
     unsigned int len, unsigned int ttl)
 {
-	// Early dev... dropping all frames on the floor.  I wonder how
-	// ZeroTier handles non-zero returns...
+	nni_aio              aio;
+	nni_sockaddr         addr;
+	struct sockaddr_in * sin  = (void *) remaddr;
+	struct sockaddr_in6 *sin6 = (void *) remaddr;
+	nni_zt_node *        ztn  = userptr;
+
+	NNI_ARG_UNUSED(threadptr);
+	NNI_ARG_UNUSED(socket);
+	NNI_ARG_UNUSED(ttl);
+
+	// Kind of unfortunate, but we have to convert the sockaddr to
+	// a neutral form, and then back again in the platform layer.
+	switch (sin->sin_family) {
+	case AF_INET:
+		addr.s_un.s_in.sa_family = NNG_AF_INET;
+		addr.s_un.s_in.sa_port   = sin->sin_port;
+		addr.s_un.s_in.sa_addr   = sin->sin_addr.s_addr;
+		break;
+	case AF_INET6:
+		// This probably will not work, since the underlying
+		// UDP socket is IPv4 only.  (In the future we can
+		// consider using a separate IPv6 socket.)
+		addr.s_un.s_in6.sa_family = NNG_AF_INET6;
+		addr.s_un.s_in6.sa_port   = sin6->sin6_port;
+		memcpy(addr.s_un.s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
+		break;
+	default:
+		// No way to understand the address.
+		return (-1);
+	}
+
+	nni_aio_init(&aio, NULL, NULL);
+	aio.a_addr           = &addr;
+	aio.a_niov           = 1;
+	aio.a_iov[0].iov_buf = (void *) data;
+	aio.a_iov[0].iov_len = len;
+
+	nni_plat_udp_send(ztn->zn_udp, &aio);
+
+	// nni_aio_wait(&aio);
+	if (nni_aio_result(&aio) != 0) {
+		return (-1);
+	}
+
 	return (0);
 }
 
@@ -295,52 +342,80 @@ static struct ZT_Node_Callbacks nni_zt_callbacks = {
 };
 
 static int
-nni_zt_find_node(nni_zt_node **znp, const char *path)
+nni_zt_find_node(nni_zt_node **ztnp, const char *path)
 {
-	nni_zt_node *      zn;
+	nni_zt_node *      ztn;
 	enum ZT_ResultCode zrv;
+	int                rv;
+	nng_sockaddr       sa;
 
 	nni_mtx_lock(&nni_zt_lk);
-	NNI_LIST_FOREACH (&nni_zt_nodes, zn) {
-		if (strcmp(path, zn->zn_path) == 0) {
-			zn->zn_refcnt++;
-			*znp = zn;
+	NNI_LIST_FOREACH (&nni_zt_nodes, ztn) {
+		if (strcmp(path, ztn->zn_path) == 0) {
+			ztn->zn_refcnt++;
+			*ztnp = ztn;
 			nni_mtx_unlock(&nni_zt_lk);
 			return (0);
+		}
+		if (ztn->zn_closed) {
+			nni_mtx_unlock(&nni_zt_lk);
+			return (NNG_ECLOSED);
 		}
 	}
 
 	// We didn't find a node, so make one.  And try to initialize it.
-	if ((zn = NNI_ALLOC_STRUCT(zn)) == NULL) {
+	if ((ztn = NNI_ALLOC_STRUCT(ztn)) == NULL) {
+		nni_mtx_unlock(&nni_zt_lk);
 		return (NNG_ENOMEM);
 	}
-	(void) snprintf(zn->zn_path, sizeof(zn->zn_path), "%s", path);
+
+	// We want to bind to any address we can (for now).  Note that
+	// at the moment we only support IPv4.  Its unclear how we are meant
+	// to handle underlying IPv6 in ZeroTier.
+	memset(&sa, 0, sizeof(sa));
+	sa.s_un.s_in.sa_family = NNG_AF_INET;
+
+	if ((rv = nni_plat_udp_open(&ztn->zn_udp, &sa)) != 0) {
+		nni_mtx_unlock(&nni_zt_lk);
+		NNI_FREE_STRUCT(ztn);
+		return (rv);
+	}
+
+	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
 	zrv = ZT_Node_new(
-	    &zn->zn_znode, zn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
+	    &ztn->zn_znode, ztn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
 	if (zrv != ZT_RESULT_OK) {
 		nni_mtx_unlock(&nni_zt_lk);
-		NNI_FREE_STRUCT(zn);
+		nni_plat_udp_close(ztn->zn_udp);
+		NNI_FREE_STRUCT(ztn);
 		return (nni_zt_result(zrv));
 	}
-	zn->zn_refcnt++;
-	*znp = zn;
-	NNI_LIST_INIT(&zn->zn_eps, nni_zt_ep, znode_link);
-	NNI_LIST_INIT(&zn->zn_pipes, nni_zt_pipe, znode_link);
+	ztn->zn_refcnt++;
+	*ztnp = ztn;
+	NNI_LIST_INIT(&ztn->zn_eps, nni_zt_ep, ze_link);
+	NNI_LIST_INIT(&ztn->zn_pipes, nni_zt_pipe, zp_link);
+	nni_list_append(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
 	return (0);
 }
 
 static void
-nni_zt_rele_node(nni_zt_node *zn)
+nni_zt_rele_node(nni_zt_node *ztn)
 {
 	nni_mtx_lock(&nni_zt_lk);
-	zn->zn_refcnt--;
-	if (zn->zn_refcnt == 0) {
-		nni_list_remove(&nni_zt_nodes, zn);
+	ztn->zn_refcnt--;
+	if (ztn->zn_refcnt == 0) {
+		nni_mtx_lock(&nni_zt_lk);
+		ztn->zn_closed = 1;
+		nni_mtx_unlock(&nni_zt_lk);
+		nni_list_remove(&nni_zt_nodes, ztn);
 	}
-	ZT_Node_delete(zn->zn_znode);
-	NNI_FREE_STRUCT(zn);
 	nni_mtx_unlock(&nni_zt_lk);
+
+	nni_aio_cancel(&ztn->zn_rcv_aio, NNG_ECLOSED);
+	nni_plat_udp_close(ztn->zn_udp);
+	ZT_Node_delete(ztn->zn_znode);
+	NNI_FREE_STRUCT(ztn);
 }
 
 static int
@@ -410,7 +485,7 @@ nni_zt_pipe_peer(void *arg)
 {
 	nni_zt_pipe *pipe = arg;
 
-	return (pipe->peer);
+	return (pipe->zp_peer);
 }
 
 static int
@@ -428,6 +503,7 @@ nni_zt_pipe_start(void *arg, nni_aio *aio)
 static void
 nni_zt_ep_fini(void *arg)
 {
+	nni_zt_ep *ep = arg;
 }
 
 static int
@@ -443,10 +519,10 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	// The <remoteaddr> part is required for remote dialers, but
 	// is not used at all for listeners.  (We have no notion of binding
 	// to different node addresses.)
-	ep->mode = mode;
-	(void) snprintf(ep->url, sizeof(url), "%s", url);
+	ep->ze_mode = mode;
+	(void) snprintf(ep->ze_url, sizeof(url), "%s", url);
 	*epp = ep;
-	nni_mtx_init(&ep->mtx);
+	nni_mtx_init(&ep->ze_lk);
 	return (0);
 }
 
@@ -511,6 +587,4 @@ static struct nni_tran nni_zt_tran = {
 	.tran_fini    = nni_zt_tran_fini,
 };
 
-#else
-int nni_zerotier_not_used = 0;
 #endif

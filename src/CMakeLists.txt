@@ -100,7 +100,6 @@ set (NNG_SOURCES
 
     transport/tcp/tcp.c
 
-    transport/zerotier/zerotier.c
 )
 
 if (NNG_PLATFORM_POSIX)
@@ -140,6 +139,10 @@ if (NNG_PLATFORM_WINDOWS)
         platform/windows/win_resolv.c
         platform/windows/win_thread.c
     )
+endif()
+
+if (NNG_ENABLE_ZEROTIER)
+    set (NNG_SOURCES ${NNG_SOURCES} transport/zerotier/zerotier.c)
 endif()
 
 include_directories(AFTER SYSTEM ${PROJECT_SOURCE_DIR}/src

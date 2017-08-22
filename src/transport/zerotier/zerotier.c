@@ -46,6 +46,8 @@ typedef struct nni_zt_pipe nni_zt_pipe;
 typedef struct nni_zt_ep   nni_zt_ep;
 typedef struct nni_zt_node nni_zt_node;
 
+#define NNI_ZT_ETHER 0x0901 // We use this ethertype
+
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
 // support different nodes (identities) based on different homedirs.
@@ -56,6 +58,10 @@ typedef struct nni_zt_node nni_zt_node;
 struct nni_zt_node {
 	char          zn_path[NNG_MAXADDRLEN + 1]; // ought to be sufficient
 	ZT_Node *     zn_znode;
+	uint64_t      zn_self;
+	uint64_t      zn_nwid;
+	int           zn_maxmtu;
+	int           zn_phymtu;
 	nni_list_node zn_link;
 	int           zn_refcnt;
 	int           zn_closed;
@@ -137,15 +143,31 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
     uint64_t netid, void **netptr, enum ZT_VirtualNetworkConfigOperation op,
     const ZT_VirtualNetworkConfig *config)
 {
+	nni_zt_node *ztn = userptr;
+
 	NNI_ARG_UNUSED(node);
-	NNI_ARG_UNUSED(userptr);
 	NNI_ARG_UNUSED(threadptr);
 	NNI_ARG_UNUSED(netid);
 	NNI_ARG_UNUSED(netptr);
-	NNI_ARG_UNUSED(op);
-	NNI_ARG_UNUSED(config);
+
 	// Maybe we don't have to create taps or anything like that.
 	// We do get our mac and MTUs from this, so there's that.
+	nni_mtx_lock(&ztn->zn_lk);
+	switch (op) {
+	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_UP:
+	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_CONFIG_UPDATE:
+		ztn->zn_self   = config->mac;
+		ztn->zn_nwid   = config->nwid;
+		ztn->zn_maxmtu = config->mtu;
+		ztn->zn_phymtu = config->physicalMtu;
+		// XXX: network name...
+		// XXX: bestMtu
+		// XXX: maxMtu
+		break;
+	default:
+		break;
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
 	return (0);
 }
 
@@ -157,6 +179,21 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
     unsigned int ethertype, unsigned int vlanid, const void *data,
     unsigned int len)
 {
+	nni_zt_node *ztn = userptr;
+
+	if (ethertype != NNI_ZT_ETHER) {
+		// This is a weird frame we can't use, just throw it away.
+		return;
+	}
+	nni_mtx_lock(&ztn->zn_lk);
+	if ((ztn->zn_self != dstmac) || (ztn->zn_nwid != netid)) {
+		nni_mtx_unlock(&ztn->zn_lk);
+		return;
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
+	// XXX: arguably we should check the dstmac...
+
+	// XXX: check frame type.
 }
 
 static void

@@ -46,6 +46,16 @@ typedef struct nni_zt_pipe nni_zt_pipe;
 typedef struct nni_zt_ep   nni_zt_ep;
 typedef struct nni_zt_node nni_zt_node;
 
+static int nni_zt_opt_home    = -1;
+static int nni_zt_opt_nwid    = -1;
+static int nni_zt_opt_locaddr = -1;
+static int nni_zt_opt_remaddr = -1;
+
+#define ZT_OPT_HOME "zt-home"
+#define ZT_OPT_NWID "zt-nwid"
+#define ZT_OPT_LOCADDR "local-address"
+#define ZT_OPT_REMADDR "remote-address"
+
 #define NNI_ZT_ETHER 0x0901 // We use this ethertype
 
 // This node structure is wrapped around the ZT_node; this allows us to
@@ -458,14 +468,11 @@ nni_zt_rele_node(nni_zt_node *ztn)
 static int
 nni_zt_chkopt(int opt, const void *dat, size_t sz)
 {
-	switch (opt) {
-	case NNG_OPT_RCVMAXSZ:
-	// case NNG_OPT_TRANSPORT(NNG_TRAN_ZT, xyz):
-	// XXX: We need a way to specify user options, like the path
-	// for the identity files.
-	default:
-		return (NNG_ENOTSUP);
+	if (opt == nng_optid_recvmaxsz) {
+		// We cannot deal with message sizes larger than 64k.
+		return (nni_chkopt_size(dat, sz, 0, 0xffff));
 	}
+	return (NNG_ENOTSUP);
 }
 
 static int
@@ -591,6 +598,20 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 	nni_aio_finish(aio, NNG_ENOTSUP, 0);
 }
 
+static int
+nni_zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
+{
+	nni_zt_ep *ep = arg;
+	return (NNG_ENOTSUP);
+}
+
+static int
+nni_zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
+{
+	nni_zt_ep *ep = arg;
+	return (NNG_ENOTSUP);
+}
+
 static nni_tran_pipe nni_zt_pipe_ops = {
 	.p_fini   = nni_zt_pipe_fini,
 	.p_start  = nni_zt_pipe_start,
@@ -608,7 +629,7 @@ static nni_tran_ep nni_zt_ep_ops = {
 	.ep_bind    = nni_zt_ep_bind,
 	.ep_accept  = nni_zt_ep_accept,
 	.ep_close   = nni_zt_ep_close,
-	.ep_setopt  = NULL, // XXX: we need the ability to set homepath, etc.
+	.ep_setopt  = nni_zt_ep_setopt,
 	.ep_getopt  = NULL,
 };
 

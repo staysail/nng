@@ -76,6 +76,15 @@ typedef struct nni_zt_node nni_zt_node;
 
 #define NNI_ZT_EPHEMERAL_PORT (1U << 31)
 
+// In theory UDP can send/recv 655507, but ZeroTier won't do more
+// than the ZT_MAX_MTU for it's virtual networks  So we need to add some
+// extra space for ZT overhead, which is currently 52 bytes, but we want
+// to leave room for future growth; 128 bytes seems sufficient.  The vast
+// majority of frames will be far far smaller -- typically Ethernet MTUs
+// are 1500 bytes.
+#define NNI_ZT_MAX_HEADROOM 128
+#define NNI_ZT_RECV_BUFSZ (ZT_MAX_MTU + NNI_ZT_MAX_HEADROOM)
+
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
 // support different nodes (identities) based on different homedirs.
@@ -84,7 +93,7 @@ typedef struct nni_zt_node nni_zt_node;
 // homedir.
 
 struct nni_zt_node {
-	char          zn_path[NNG_MAXADDRLEN + 1]; // ought to be sufficient
+	char          zn_path[NNG_MAXADDRLEN]; // ought to be sufficient
 	ZT_Node *     zn_znode;
 	uint64_t      zn_self;
 	uint64_t      zn_nwid;
@@ -101,6 +110,10 @@ struct nni_zt_node {
 	nni_aio       zn_rcv_aio;
 	nni_aio       zn_snd_aio;
 	nni_mtx       zn_lk;
+	char *        zn_recv_buf;
+	nni_thr       zn_bgthr;
+	nni_time      zn_bgtime;
+	nni_cv        zn_bgcv;
 };
 
 struct nni_zt_pipe {
@@ -127,8 +140,8 @@ struct nni_zt_pipe {
 
 struct nni_zt_ep {
 	nni_list_node ze_link;
-	char          ze_url[NNG_MAXADDRLEN + 1];
-	char          ze_home[NNG_MAXADDRLEN + 1]; // should be enough
+	char          ze_url[NNG_MAXADDRLEN];
+	char          ze_home[NNG_MAXADDRLEN]; // should be enough
 	ZT_Node *     ze_ztnode;
 	uint64_t      ze_nwid;
 	int           ze_mode;
@@ -143,6 +156,25 @@ struct nni_zt_ep {
 
 static nni_mtx  nni_zt_lk;
 static nni_list nni_zt_nodes;
+
+static void
+nni_zt_node_rcv_cb(void *arg)
+{
+	nni_zt_node *ztn = arg;
+	nni_aio *    aio = &ztn->zn_rcv_aio;
+
+	if (nni_aio_result(aio) != 0) {
+		// Outside of memory exhaustion, we can't really think
+		// of any reason for this to legitimately fail.  Arguably
+		// we should inject a fallback delay, but for now we just
+		// carry on.
+		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket is
+		// closed or fails in a permanent way, then we need to stop
+		// the UDP work, and forward an error to all the other
+		// endpoints and pipes!
+		return;
+	}
+}
 
 static int
 nni_zt_result(enum ZT_ResultCode rv)
@@ -259,6 +291,7 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 	nni_zt_node *ztn = userptr;
 	char         path[NNG_MAXADDRLEN + 1];
 	const char * fname;
+	size_t       sz;
 
 	NNI_ARG_UNUSED(objid); // only use global files
 
@@ -267,8 +300,12 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 		return;
 	}
 
-	(void) snprintf(
-	    path, sizeof(path), "%s%s%s", ztn->zn_path, pathsep, fname);
+	sz = sizeof(path);
+	if (snprintf(path, sz, "%s%s%s", ztn->zn_path, pathsep, fname) >= sz) {
+		// If the path is too long, we can't cope.  We just
+		// decline to store anything.
+		return;
+	}
 
 	// We assume that everyone can do standard C I/O.
 	// This may be a bad assumption.  If that's the case,
@@ -290,7 +327,7 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 		fclose(file);
 		(void) unlink(path);
 	}
-
+	printf("WROTE TO %s\n", path);
 	(void) fclose(file);
 }
 
@@ -304,16 +341,20 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 	char         path[NNG_MAXADDRLEN + 1];
 	const char * fname;
 	int          nread;
+	size_t       sz;
 
-	NNI_ARG_UNUSED(objid); // only use global files
+	NNI_ARG_UNUSED(objid); // we only use global files
 
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
 		return (-1);
 	}
 
-	(void) snprintf(
-	    path, sizeof(path), "%s%s%s", ztn->zn_path, pathsep, fname);
+	sz = sizeof(path);
+	if (snprintf(path, sz, "%s%s%s", ztn->zn_path, pathsep, fname) >= sz) {
+		// If the path is too long, we can't cope.
+		return (-1);
+	}
 
 	// We assume that everyone can do standard C I/O.
 	// This may be a bad assumption.  If that's the case,
@@ -416,12 +457,17 @@ nni_zt_node_destroy(nni_zt_node *ztn)
 	if (ztn->zn_znode != NULL) {
 		ZT_Node_delete(ztn->zn_znode);
 	}
-
+	if (ztn->zn_udp != NULL) {
+		nni_plat_udp_close(ztn->zn_udp);
+	}
+	if (ztn->zn_recv_buf != NULL) {
+		nni_free(ztn->zn_recv_buf, NNI_ZT_RECV_BUFSZ);
+	}
 	nni_aio_fini(&ztn->zn_snd_aio);
 	nni_aio_fini(&ztn->zn_rcv_aio);
-	nni_plat_udp_close(ztn->zn_udp);
-	nni_idhash_destroy(ztn->zn_eps);
-	nni_idhash_destroy(ztn->zn_pipes);
+	nni_idhash_fini(ztn->zn_eps);
+	nni_idhash_fini(ztn->zn_pipes);
+	nni_cv_fini(&ztn->zn_bgcv);
 	nni_mtx_fini(&ztn->zn_lk);
 	NNI_FREE_STRUCT(ztn);
 }
@@ -449,9 +495,15 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	NNI_LIST_INIT(&ztn->zn_eplist, nni_zt_ep, ze_link);
 	NNI_LIST_INIT(&ztn->zn_plist, nni_zt_pipe, zp_link);
 	nni_mtx_init(&ztn->zn_lk);
+	nni_cv_init(&ztn->zn_bgcv, &ztn->zn_lk);
+	nni_aio_init(&ztn->zn_rcv_aio, nni_zt_node_rcv_cb, ztn);
 
-	if (((rv = nni_idhash_create(&ztn->zn_eps)) != 0) ||
-	    ((rv = nni_idhash_create(&ztn->zn_pipes)) != 0) ||
+	if ((ztn->zn_recv_buf = nni_alloc(NNI_ZT_RECV_BUFSZ)) == NULL) {
+		nni_zt_node_destroy(ztn);
+		return (NNG_ENOMEM);
+	}
+	if (((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
+	    ((rv = nni_idhash_init(&ztn->zn_pipes)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp, &sa)) != 0)) {
 		nni_zt_node_destroy(ztn);
 		return (rv);
@@ -469,7 +521,7 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 }
 
 static int
-nni_zt_find_node(nni_zt_node **ztnp, const char *path)
+nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 {
 	nni_zt_node *      ztn;
 	enum ZT_ResultCode zrv;
@@ -491,58 +543,31 @@ nni_zt_find_node(nni_zt_node **ztnp, const char *path)
 	}
 
 	// We didn't find a node, so make one.  And try to initialize it.
-	if ((ztn = NNI_ALLOC_STRUCT(ztn)) == NULL) {
+	if ((rv = nni_zt_node_create(&ztn, path)) != 0) {
 		nni_mtx_unlock(&nni_zt_lk);
-		return (NNG_ENOMEM);
-	}
-
-	// We want to bind to any address we can (for now).  Note that
-	// at the moment we only support IPv4.  Its unclear how we are meant
-	// to handle underlying IPv6 in ZeroTier.
-	memset(&sa, 0, sizeof(sa));
-	sa.s_un.s_in.sa_family = NNG_AF_INET;
-
-	if ((rv = nni_plat_udp_open(&ztn->zn_udp, &sa)) != 0) {
-		nni_mtx_unlock(&nni_zt_lk);
-		NNI_FREE_STRUCT(ztn);
 		return (rv);
-	}
-
-	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
-	zrv = ZT_Node_new(
-	    &ztn->zn_znode, ztn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
-	if (zrv != ZT_RESULT_OK) {
-		nni_mtx_unlock(&nni_zt_lk);
-		nni_plat_udp_close(ztn->zn_udp);
-		NNI_FREE_STRUCT(ztn);
-		return (nni_zt_result(zrv));
 	}
 	ztn->zn_refcnt++;
 	*ztnp = ztn;
-	NNI_LIST_INIT(&ztn->zn_eplist, nni_zt_ep, ze_link);
-	NNI_LIST_INIT(&ztn->zn_plist, nni_zt_pipe, zp_link);
 	nni_list_append(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
 	return (0);
 }
 
 static void
-nni_zt_rele_node(nni_zt_node *ztn)
+nni_zt_node_rele(nni_zt_node *ztn)
 {
 	nni_mtx_lock(&nni_zt_lk);
 	ztn->zn_refcnt--;
-	if (ztn->zn_refcnt == 0) {
-		nni_mtx_lock(&nni_zt_lk);
-		ztn->zn_closed = 1;
+	if (ztn->zn_refcnt != 0) {
 		nni_mtx_unlock(&nni_zt_lk);
-		nni_list_remove(&nni_zt_nodes, ztn);
+		return;
 	}
+	ztn->zn_closed = 1;
+	nni_list_remove(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
 
-	nni_aio_cancel(&ztn->zn_rcv_aio, NNG_ECLOSED);
-	nni_plat_udp_close(ztn->zn_udp);
-	ZT_Node_delete(ztn->zn_znode);
-	NNI_FREE_STRUCT(ztn);
+	nni_zt_node_destroy(ztn);
 }
 
 static int
@@ -689,7 +714,7 @@ nni_zt_ep_close(void *arg)
 	nni_mtx_unlock(&nni_zt_lk);
 
 	if (ztn != NULL) {
-		nni_zt_rele_node(ztn);
+		nni_zt_node_rele(ztn);
 		ep->ze_ztnode = NULL;
 	}
 }
@@ -702,23 +727,38 @@ nni_zt_ep_bind(void *arg)
 	nni_zt_ep *  srch;
 	nni_zt_node *ztn;
 
-	if ((rv = nni_zt_find_node(&ztn, ep->ze_home)) != 0) {
+	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
 		return (rv);
 	}
 	nni_mtx_lock(&nni_zt_lk);
 
 	// Look to ensure we have an exclusive bind.
-	NNI_LIST_FOREACH (&ztn->zn_eplist, srch) {
-		if ((srch->ze_mode == NNI_EP_MODE_LISTEN) &&
-		    (srch->ze_port == ep->ze_port)) {
-			nni_mtx_unlock(&nni_zt_lk);
-			nni_zt_rele_node(ztn);
-			return (NNG_EADDRINUSE);
-		}
+	if (nni_idhash_find(ztn->zn_eps, ep->ze_port, (void **) &srch) == 0) {
+		nni_mtx_unlock(&nni_zt_lk);
+		nni_zt_node_rele(ztn);
+		return (NNG_EADDRINUSE);
 	}
-
+	if (ep->ze_port == 0) {
+		uint64_t port;
+		// ask for an ephemeral port
+		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
+		if (rv == 0) {
+			NNI_ASSERT(port < (1ULL << 32));
+			NNI_ASSERT(port & NNI_ZT_EPHEMERAL_PORT);
+			ep->ze_port = (uint32_t) port;
+		}
+	} else {
+		// we have a specific port to use
+		rv = nni_idhash_insert(ztn->zn_eps, ep->ze_port, ep);
+	}
+	if (rv != 0) {
+		nni_mtx_unlock(&nni_zt_lk);
+		nni_zt_node_rele(ztn);
+		return (rv);
+	}
+	nni_list_append(&ztn->zn_eplist, ep);
 	nni_mtx_unlock(&nni_zt_lk);
-	// XXX: check to see if we have a port bound to this node.
+
 	return (0);
 }
 
@@ -830,5 +870,11 @@ static struct nni_tran nni_zt_tran = {
 	.tran_init    = nni_zt_tran_init,
 	.tran_fini    = nni_zt_tran_fini,
 };
+
+int
+nni_zt_register(void)
+{
+	return (nni_tran_register(&nni_zt_tran));
+}
 
 #endif

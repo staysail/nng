@@ -1,7 +1,7 @@
 ZeroTier Mapping for Scalability Protocols
 ===========================================
 
-sp-zerotier-mapping-03
+sp-zerotier-mapping-04
 ~~~~~~~~~~~~~~~~~~~~~~
 
 Abstract
@@ -79,21 +79,21 @@ Each frame shall be prepended with the following header:
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |    0x90       |   0x01        |  op   | flags |   version     |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |        fragment offset        |       fragment length         |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |                        destination port                       |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |                          source port                          |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |          type                 |           message ID          |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |       payload...
+   |     payload...
    +-+-+-+-+-+-+-+-
 
 All numeric fields are in big-endian byte order.
 
 As above, the start of each frame is just as a normal Ethernet frame,
-with destination, source, and type of 0x901.
+with destination, source, and type of 0x901.  (It is possible for a
+tag to be present between the ethertype and the source address.  If
+present, that shall follow the standards for Ethernet tagged frames.
+The use of Ethernet tags, typically for QoS or VLANs, is not discussed
+further here.)
 
 The `op` is a field that indicates the type of message being sent.  The
 following values are defined: `DATA` (0), `CONN` (1), `DISC` (2), `PING` (3),
@@ -113,6 +113,11 @@ Note that the `MF` and the `AK` flag bits are mutually exclusive.
 
 The `version` byte MUST be set to 0x1.  Implementations *MUST* discard
 any messages received for any other version.
+
+The `source port` and `destination port` are used to construct a logical
+conversation.  They are discussed further below.
+
+The remainder of frame varies depending on the `op` used.
 
 The fragment length and offset are given in terms of octets, and only
 include the payload.  For example, the first fragment of a message
@@ -160,7 +165,30 @@ DATA messages
 
 `DATA` messages carry SP protocol payload data.  They can only be sent
 on an established session (see `CONN` messages below), and are never
-acknowledged.
+acknowledged (in this version).
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |         message ID            |        fragment length        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       fragment offset                         |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |       user data...
+   +-+-+-+-+-+-+-+-
+
+This allows for a maximum message size of 4GB, made of fragments of
+at most 64K.  However, due to current considerations with respect to
+the size of ZeroTier frames (which are limited to several KB), and
+the fact that as the fragment count increases the likelihood of
+losing a fragment and having to resend a large message increases
+severely, the current protocol is restricted to sending messages
+not larger than 64K.  (This will likely be addressed with an
+acknowledgement phase in the next iteration of the protocol.)
+
+The `fragment length` is the number of bytes of `user data` following
+the data header.
+
 
 CONN messages
 ~~~~~~~~~~~~~
@@ -168,37 +196,18 @@ CONN messages
 `CONN` frames represent a session establishment.  They allow a peer to
 advertise its port number to a remote peer, and to verify that a peer
 is responsive.  The payload for the `CONN` frame is a 4 byte (big-endian)
-value, consisting of the SP protocol ID of the sender.
+value, consisting of the SP protocol ID of the sender:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                      SP protocol ID                           |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 The connection is initiated by the initiator sending this message,
 with its own SP protocol ID.  The `AK` flag will in this case be clear.
 The initiator must choose a `source port` number that is not currently
-being used with the remote peer.  (Port numbers used for communication
-with other network peers may be used...)
-
-// There are some good questions here regarding port conflicts.  We'd
-// like to have each party choose a unique ephemeral port number, that
-// way we can generate a 32-bit hash ID which we can use for idhash
-// table lookups.
-//
-// One idea we can explore here is the idea that listening ports (rendezvous
-// ports) can be unique, since they only appear in the CONN message, and
-// would need not be directed elsewhere.
-//
-// The other point of realization is that a server will always know whether
-// it can safely reuse one *it's* ephemeral IDs, because it knows the client
-// ID apriori (given to it at connect.)
-//
-// Clients need to chooes a unique ephemeral ID for each connection, since
-// they have no idea what ID a server might give back.  Another way to
-// deal with this is that we would just disconnect (drop the connection)
-// if the negotiated ID would conflict with an entry we already have in the
-// table.  The likelhood of collisions should be sufficiently rare that this
-// approach may be sufficient.
-//
-// Finally, any 32-bit session ID (formulated by the port pairs) needs to
-// be held in the table until both client and server have negotiated
-// the close, in order to avoid collisions in the sessions.
+being used with the remote peer. 
 
 The responder will acknowledge this by replying with its SP protocol
 ID in the 4-byte payload, with the `AK` flag set.
@@ -220,11 +229,6 @@ notifies the remote sender that no more data will be sent or
 accepted, and the session resources may be released.  There is no
 payload.  The party closing the session sends this with the AK flag
 clear.  There is no acknowledgement.
-
-// Note that we might want an AK, to clear the session cache.  That
-// said, given that we have relatively short RTTs I think we can
-// fairly easily ignore this by just keeping the tables on an expiry
-// list.
 
 PING messages
 ~~~~~~~~~~~~~

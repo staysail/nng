@@ -15,6 +15,12 @@
 
 #include "core/nng_impl.h"
 
+const char *nng_opt_zt_home = "zt:home";
+const char *nng_opt_zt_nwid = "zt:nwid";
+
+int nng_optid_zt_home = -1;
+int nng_optid_zt_nwid = -1;
+
 #ifndef _WIN32
 #include <unistd.h>
 #endif
@@ -45,16 +51,6 @@
 typedef struct nni_zt_pipe nni_zt_pipe;
 typedef struct nni_zt_ep   nni_zt_ep;
 typedef struct nni_zt_node nni_zt_node;
-
-static int nni_zt_opt_home    = -1;
-static int nni_zt_opt_nwid    = -1;
-static int nni_zt_opt_locaddr = -1;
-static int nni_zt_opt_remaddr = -1;
-
-#define ZT_OPT_HOME "zt-home"
-#define ZT_OPT_NWID "zt-nwid"
-#define ZT_OPT_LOCADDR "local-address"
-#define ZT_OPT_REMADDR "remote-address"
 
 #define NNI_ZT_ETHER 0x0901 // We use this ethertype
 
@@ -472,12 +468,32 @@ nni_zt_chkopt(int opt, const void *dat, size_t sz)
 		// We cannot deal with message sizes larger than 64k.
 		return (nni_chkopt_size(dat, sz, 0, 0xffff));
 	}
+	if (opt == nng_optid_zt_home) {
+		for (int i = 0; i < sz; i++) {
+			if (((const char *) dat)[i] == '\0') {
+				return (0);
+			}
+			if (i >= NNG_MAXADDRLEN) {
+				return (NNG_EINVAL);
+			}
+		}
+		// XXX: should we apply additional security checks?
+		// home path is not null terminated
+		return (NNG_EINVAL);
+	}
 	return (NNG_ENOTSUP);
 }
 
 static int
 nni_zt_tran_init(void)
 {
+	int rv;
+	if (((rv = nni_option_register(nng_opt_zt_home, &nng_optid_zt_home)) !=
+	        0) ||
+	    ((rv = nni_option_register(nng_opt_zt_nwid, &nng_optid_zt_nwid)) !=
+	        0)) {
+		return (rv);
+	}
 	nni_mtx_init(&nni_zt_lk);
 	NNI_LIST_INIT(&nni_zt_nodes, nni_zt_node, zn_link);
 	return (0);
@@ -486,6 +502,7 @@ nni_zt_tran_init(void)
 static void
 nni_zt_tran_fini(void)
 {
+	nng_optid_zt_home = -1;
 	NNI_ASSERT(nni_list_empty(&nni_zt_nodes));
 	nni_mtx_fini(&nni_zt_lk);
 }
@@ -602,14 +619,63 @@ static int
 nni_zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 {
 	nni_zt_ep *ep = arg;
-	return (NNG_ENOTSUP);
+	int        i;
+	int        rv = NNG_ENOTSUP;
+
+	if (opt == nng_optid_recvmaxsz) {
+		nni_mtx_lock(&ep->ze_lk);
+		rv = nni_setopt_size(&ep->ze_rcvmax, data, size, 0, 0xffff);
+		nni_mtx_unlock(&ep->ze_lk);
+	} else if (opt == nng_optid_zt_home) {
+		for (i = 0; i < size; i++) {
+			if (((const char *) data)[i] == '\0') {
+				break;
+			}
+		}
+		if ((i >= size) || (i >= NNG_MAXADDRLEN)) {
+			return (NNG_EINVAL);
+		}
+		nni_mtx_lock(&ep->ze_lk);
+		(void) snprintf(ep->ze_home, sizeof(ep->ze_home), "%s", data);
+		nni_mtx_unlock(&ep->ze_lk);
+		rv = 0;
+	}
+	return (rv);
 }
 
 static int
 nni_zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 {
 	nni_zt_ep *ep = arg;
-	return (NNG_ENOTSUP);
+	int        rv = NNG_ENOTSUP;
+
+	if (opt == nng_optid_recvmaxsz) {
+		nni_mtx_lock(&ep->ze_lk);
+		rv = nni_getopt_size(&ep->ze_rcvmax, data, sizep);
+		nni_mtx_unlock(&ep->ze_lk);
+	} else if (opt == nng_optid_zt_home) {
+		// XXX: we really want a helper for string data.
+		nni_mtx_lock(&ep->ze_lk);
+		size_t sz = strlen(ep->ze_home);
+		if (sz > *sizep) {
+			sz = *sizep;
+		}
+		*sizep = strlen(ep->ze_home);
+		nni_mtx_lock(&ep->ze_lk);
+		memcpy(data, ep->ze_home, sz);
+		rv = 0;
+	} else if (opt == nng_optid_zt_nwid) {
+		size_t sz = sizeof(uint64_t);
+		if (sz > *sizep) {
+			sz = *sizep;
+		}
+		*sizep = sizeof(uint64_t);
+		nni_mtx_lock(&ep->ze_lk);
+		memcpy(&ep->ze_nwid, data, sz);
+		nni_mtx_unlock(&ep->ze_lk);
+		rv = 0;
+	}
+	return (rv);
 }
 
 static nni_tran_pipe nni_zt_pipe_ops = {

@@ -54,6 +54,28 @@ typedef struct nni_zt_node nni_zt_node;
 
 #define NNI_ZT_ETHER 0x0901 // We use this ethertype
 
+// opcodes.  As these are encoded with the 4 bit flags field, we just
+// shift them up one nibble.  The flags will be set in the lower nibble.
+#define NNI_ZT_OP_DAT 0x00 // Data message
+#define NNI_ZT_OP_CON 0x10 // Connection request
+#define NNI_ZT_OP_DIS 0x20 // Disconnect request
+#define NNI_ZT_OP_PNG 0x30 // Ping (keep alive)
+#define NNI_ZT_OP_ERR 0x40 // Error
+
+#define NNI_ZT_FLAG_MF 0x01 // more fragments
+#define NNI_ZT_FLAG_AK 0x02 // acknowledgement
+
+#define NNI_ZT_VERSION 0x01 // specified per RFC
+
+#define NNI_ZT_EREFUSED 0x01 // Nothing there, connection refused
+#define NNI_ZT_ENOTCONN 0x02 // Connection does not exist
+#define NNI_ZT_EWRONGSP 0x03 // Wrong SP number
+#define NNI_ZT_EPROTERR 0x04 // Other protocol error
+#define NNI_ZT_EMSGSIZE 0x05 // Message too large
+#define NNI_ZT_EUNKNOWN 0xff // Other errors
+
+#define NNI_ZT_EPHEMERAL_PORT (1U << 31)
+
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
 // support different nodes (identities) based on different homedirs.
@@ -88,6 +110,9 @@ struct nni_zt_pipe {
 	nni_aio *     zp_user_txaio;
 	nni_aio *     zp_user_rxaio;
 	nni_aio *     zp_user_negaio;
+	uint64_t      zp_conv_id;
+	uint32_t      zp_src_port;
+	uint32_t      zp_dst_port;
 
 	// XXX: fraglist
 	nni_sockaddr zp_remaddr;
@@ -108,6 +133,8 @@ struct nni_zt_ep {
 	int           ze_mode;
 	nni_sockaddr  ze_locaddr;
 	int           ze_closed;
+	uint32_t      ze_src_port;
+	uint32_t      ze_dst_port;
 	uint16_t      ze_proto;
 	size_t        ze_rcvmax;
 	nni_aio       ze_aio;
@@ -596,11 +623,6 @@ static int
 nni_zt_ep_bind(void *arg)
 {
 	return (NNG_ENOTSUP);
-}
-
-static void
-nni_zt_ep_finish(nni_zt_ep *ep)
-{
 }
 
 static void

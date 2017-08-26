@@ -9,6 +9,7 @@
 //
 
 #ifdef NNG_HAVE_ZEROTIER
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,7 +84,7 @@ typedef struct nni_zt_node nni_zt_node;
 // majority of frames will be far far smaller -- typically Ethernet MTUs
 // are 1500 bytes.
 #define NNI_ZT_MAX_HEADROOM 128
-#define NNI_ZT_RECV_BUFSZ (ZT_MAX_MTU + NNI_ZT_MAX_HEADROOM)
+#define NNI_ZT_RCV_BUFSZ (ZT_MAX_MTU + NNI_ZT_MAX_HEADROOM)
 
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
@@ -102,15 +103,16 @@ struct nni_zt_node {
 	nni_list_node zn_link;
 	int           zn_refcnt;
 	int           zn_closed;
+	nni_mtx       zn_lk;
 	nni_plat_udp *zn_udp;
 	nni_list      zn_eplist;
 	nni_list      zn_plist;
 	nni_idhash *  zn_eps;
 	nni_idhash *  zn_pipes;
-	nni_aio       zn_rcv_aio;
 	nni_aio       zn_snd_aio;
-	nni_mtx       zn_lk;
-	char *        zn_recv_buf;
+	nni_aio       zn_rcv_aio;
+	char *        zn_rcv_buf;
+	nng_sockaddr  zn_rcv_addr;
 	nni_thr       zn_bgthr;
 	nni_time      zn_bgtime;
 	nni_cv        zn_bgcv;
@@ -144,6 +146,7 @@ struct nni_zt_ep {
 	char          ze_home[NNG_MAXADDRLEN]; // should be enough
 	ZT_Node *     ze_ztnode;
 	uint64_t      ze_nwid;
+	uint64_t      ze_node; // remote node address normally
 	int           ze_mode;
 	nni_sockaddr  ze_addr;
 	uint32_t      ze_port;
@@ -158,10 +161,53 @@ static nni_mtx  nni_zt_lk;
 static nni_list nni_zt_nodes;
 
 static void
-nni_zt_node_rcv_cb(void *arg)
+nni_zt_bgthr(void *arg)
 {
 	nni_zt_node *ztn = arg;
-	nni_aio *    aio = &ztn->zn_rcv_aio;
+	nni_time     now;
+
+	nni_mtx_lock(&ztn->zn_lk);
+	for (;;) {
+		now = nni_clock() / 1000; // msec
+
+		if (ztn->zn_closed) {
+			break;
+		}
+
+		if (now < ztn->zn_bgtime) {
+			nni_cv_until(&ztn->zn_bgcv, ztn->zn_bgtime);
+			continue;
+		}
+
+		nni_mtx_unlock(&ztn->zn_lk);
+		ZT_Node_processBackgroundTasks(ztn->zn_znode, NULL, now, &now);
+		nni_mtx_lock(&ztn->zn_lk);
+
+		ztn->zn_bgtime = now * 1000; // usec
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
+}
+
+static void
+nni_zt_node_resched(nni_zt_node *ztn, uint64_t msec)
+{
+	nni_mtx_lock(&ztn->zn_lk);
+	ztn->zn_bgtime = msec * 1000; // convert to usec
+	nni_cv_wake1(&ztn->zn_bgcv);
+	nni_mtx_unlock(&ztn->zn_lk);
+}
+
+static void
+nni_zt_node_rcv_cb(void *arg)
+{
+	nni_zt_node *            ztn = arg;
+	nni_aio *                aio = &ztn->zn_rcv_aio;
+	struct sockaddr_storage  sa;
+	struct sockaddr_in *     sin;
+	struct sockaddr_in6 *    sin6;
+	struct nng_sockaddr_in * nsin;
+	struct nng_sockaddr_in6 *nsin6;
+	uint64_t                 now;
 
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
@@ -174,6 +220,47 @@ nni_zt_node_rcv_cb(void *arg)
 		// endpoints and pipes!
 		return;
 	}
+
+	memset(&sa, 0, sizeof(sa));
+	switch (ztn->zn_rcv_addr.s_un.s_family) {
+	case NNG_AF_INET:
+		sin                  = (void *) &sa;
+		nsin                 = &ztn->zn_rcv_addr.s_un.s_in;
+		sin->sin_family      = AF_INET;
+		sin->sin_port        = nsin->sa_port;
+		sin->sin_addr.s_addr = nsin->sa_addr;
+		break;
+	case NNG_AF_INET6:
+		sin6              = (void *) &sa;
+		nsin6             = &ztn->zn_rcv_addr.s_un.s_in6;
+		sin6->sin6_family = AF_INET6;
+		sin6->sin6_port   = nsin6->sa_port;
+		memcpy(&sin6->sin6_addr, nsin6->sa_addr, 16);
+	default:
+		NNI_ASSERT(0); // bad family!
+		goto skip;
+	}
+
+	now = nni_clock() / 1000; // msec
+
+	// We are not going to perform any validation of the data; we
+	// just pass this straight into the ZeroTier core.
+	// XXX: CHECK THIS, if it fails then we have a fatal error with
+	// the znode, and have to shut everything down.
+	ZT_Node_processWirePacket(ztn->zn_znode, NULL, now, 0, (void *) &sa,
+	    ztn->zn_rcv_buf, aio->a_count, &now);
+
+	// Schedule background work
+	nni_zt_node_resched(ztn, now);
+
+skip:
+	// Schedule another receive.
+	nni_mtx_lock(&ztn->zn_lk);
+	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
+		aio->a_count = 0;
+		nni_plat_udp_recv(ztn->zn_udp, &ztn->zn_rcv_aio);
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
 }
 
 static int
@@ -244,6 +331,7 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 
 	if (ethertype != NNI_ZT_ETHER) {
 		// This is a weird frame we can't use, just throw it away.
+		printf("DEBUG: WRONG ETHERTYPE %x\n", ethertype);
 		return;
 	}
 	nni_mtx_lock(&ztn->zn_lk);
@@ -426,9 +514,15 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 	aio.a_iov[0].iov_buf = (void *) data;
 	aio.a_iov[0].iov_len = len;
 
-	nni_plat_udp_send(ztn->zn_udp, &aio);
+	nni_mtx_lock(&ztn->zn_lk);
+	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
+		// This should be non-blocking/best-effort, so while not
+		// great that we're holding the lock, also not tragic.
+		nni_plat_udp_send(ztn->zn_udp, &aio);
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
 
-	// nni_aio_wait(&aio);
+	nni_aio_wait(&aio);
 	if (nni_aio_result(&aio) != 0) {
 		return (-1);
 	}
@@ -454,14 +548,18 @@ nni_zt_node_destroy(nni_zt_node *ztn)
 	nni_aio_stop(&ztn->zn_snd_aio);
 	nni_aio_stop(&ztn->zn_rcv_aio);
 
+	// We will already have been marked for close, so the
+	// bgthread should already have wound down, or be doing so.
+	nni_thr_fini(&ztn->zn_bgthr);
+
 	if (ztn->zn_znode != NULL) {
 		ZT_Node_delete(ztn->zn_znode);
 	}
 	if (ztn->zn_udp != NULL) {
 		nni_plat_udp_close(ztn->zn_udp);
 	}
-	if (ztn->zn_recv_buf != NULL) {
-		nni_free(ztn->zn_recv_buf, NNI_ZT_RECV_BUFSZ);
+	if (ztn->zn_rcv_buf != NULL) {
+		nni_free(ztn->zn_rcv_buf, NNI_ZT_RCV_BUFSZ);
 	}
 	nni_aio_fini(&ztn->zn_snd_aio);
 	nni_aio_fini(&ztn->zn_rcv_aio);
@@ -498,12 +596,13 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	nni_cv_init(&ztn->zn_bgcv, &ztn->zn_lk);
 	nni_aio_init(&ztn->zn_rcv_aio, nni_zt_node_rcv_cb, ztn);
 
-	if ((ztn->zn_recv_buf = nni_alloc(NNI_ZT_RECV_BUFSZ)) == NULL) {
+	if ((ztn->zn_rcv_buf = nni_alloc(NNI_ZT_RCV_BUFSZ)) == NULL) {
 		nni_zt_node_destroy(ztn);
 		return (NNG_ENOMEM);
 	}
 	if (((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
 	    ((rv = nni_idhash_init(&ztn->zn_pipes)) != 0) ||
+	    ((rv = nni_thr_init(&ztn->zn_bgthr, nni_zt_bgthr, ztn)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp, &sa)) != 0)) {
 		nni_zt_node_destroy(ztn);
 		return (rv);
@@ -516,6 +615,10 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 		return (nni_zt_result(zrv));
 	}
 
+	nni_thr_run(&ztn->zn_bgthr);
+
+	// Schedule an initial background run.
+	nni_zt_node_resched(ztn, 1);
 	*ztnp = ztn;
 	return (0);
 }
@@ -564,6 +667,7 @@ nni_zt_node_rele(nni_zt_node *ztn)
 		return;
 	}
 	ztn->zn_closed = 1;
+	nni_cv_wake(&ztn->zn_bgcv);
 	nni_list_remove(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
 
@@ -675,9 +779,54 @@ nni_zt_ep_fini(void *arg)
 }
 
 static int
+nni_zt_parsehex(const char **sp, uint64_t *valp)
+{
+	int         n;
+	const char *s = *sp;
+	char        c;
+	uint64_t    v;
+
+	for (v = 0, n = 0; (n < 16) && isxdigit(c = tolower(*s)); n++, s++) {
+		v *= 16;
+		if (isdigit(c)) {
+			v += (c - '0');
+		} else {
+			v += ((c - 'a') + 10);
+		}
+	}
+
+	*sp   = s;
+	*valp = v;
+	return (n ? NNG_EINVAL : 0);
+}
+
+static int
+nni_zt_parsedec(const char **sp, uint64_t *valp)
+{
+	int         n;
+	const char *s = *sp;
+	char        c;
+	uint64_t    v;
+
+	for (v = 0, n = 0; (n < 20) && isdigit(c = *s); n++, s++) {
+		v *= 10;
+		v += (c - '0');
+	}
+	*sp = s;
+	return (n ? NNG_EINVAL : 0);
+}
+
+static int
 nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 {
-	nni_zt_ep *ep;
+	nni_zt_ep * ep;
+	size_t      sz;
+	uint64_t    nwid;
+	uint64_t    node;
+	uint64_t    port;
+	int         n;
+	char        c;
+	const char *u;
 
 	if ((ep = NNI_ALLOC_STRUCT(ep)) == NULL) {
 		return (NNG_ENOMEM);
@@ -688,8 +837,48 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	// is not used at all for listeners.  (We have no notion of binding
 	// to different node addresses.)
 	ep->ze_mode = mode;
-	(void) snprintf(ep->ze_url, sizeof(url), "%s", url);
+	sz          = sizeof(ep->ze_url);
+
+	if ((strncmp(url, "zt://", strlen("zt://")) != 0) ||
+	    (nni_strlcpy(ep->ze_url, url, sz) >= sz)) {
+		return (NNG_EADDRINVAL);
+	}
 	*epp = ep;
+	u    = url + strlen("zt://");
+	// Parse the URL.
+
+	switch (mode) {
+	case NNI_EP_MODE_DIAL:
+		// We require zt://<nwid>/<remotenode>:<port>
+		// The remotenode must be a 40 bit address (max), and
+		// we require a non-zero port to connect to.
+		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u != '/') ||
+		    (nni_zt_parsehex(&u, &node) != 0) ||
+		    (node > 0xffffffffff) || (*u != ':') ||
+		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
+		    (port == 0)) {
+			return (NNG_EADDRINVAL);
+		}
+		break;
+	case NNI_EP_MODE_LISTEN:
+		// Listen mode is just zt://<nwid>:<port>.  The port
+		// may be zero in this case, to indicate that the server
+		// should allocate an ephemeral port.
+		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u != ':') ||
+		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0')) {
+			return (NNG_EADDRINVAL);
+		}
+		node = 0;
+		break;
+	default:
+		NNI_ASSERT(0);
+		break;
+	}
+
+	ep->ze_port = port;
+	ep->ze_node = node;
+	ep->ze_nwid = nwid;
+
 	nni_mtx_init(&ep->ze_lk);
 	return (0);
 }

@@ -301,6 +301,8 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 	NNI_ARG_UNUSED(netid);
 	NNI_ARG_UNUSED(netptr);
 
+	printf("VT NET CONFIG!!!! %d\n", op);
+
 	// Maybe we don't have to create taps or anything like that.
 	// We do get our mac and MTUs from this, so there's that.
 	nni_mtx_lock(&ztn->zn_lk);
@@ -311,6 +313,7 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 		ztn->zn_nwid   = config->nwid;
 		ztn->zn_maxmtu = config->mtu;
 		ztn->zn_phymtu = config->physicalMtu;
+		printf("LOOKS UP to ME!\n");
 		break;
 	default:
 		break;
@@ -349,6 +352,7 @@ static void
 nni_zt_event_cb(ZT_Node *node, void *userptr, void *threadptr,
     enum ZT_Event event, const void *payload)
 {
+	printf("GOT an EVENT %d\n", event);
 }
 
 static const char *zt_files[] = {
@@ -383,10 +387,14 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 
 	NNI_ARG_UNUSED(objid); // only use global files
 
+	printf("STATE PUT %d len %u\n", objtype, len);
+
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
+		printf("NOPE!\n");
 		return;
 	}
+	printf("FNAME is %s\n", fname);
 
 	sz = sizeof(path);
 	if (snprintf(path, sz, "%s%s%s", ztn->zn_path, pathsep, fname) >= sz) {
@@ -433,6 +441,7 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 
 	NNI_ARG_UNUSED(objid); // we only use global files
 
+	printf("STATE GET %d (len %u)\n", objtype, len);
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
 		return (-1);
@@ -625,6 +634,19 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 
 	// Schedule an initial background run.
 	nni_zt_node_resched(ztn, 1);
+
+	// Schedule receive
+	ztn->zn_rcv_aio.a_niov           = 1;
+	ztn->zn_rcv_aio.a_iov[0].iov_buf = ztn->zn_rcv_buf;
+	ztn->zn_rcv_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
+	ztn->zn_rcv_aio.a_addr           = &ztn->zn_rcv_addr;
+	ztn->zn_rcv_aio.a_count          = 0;
+
+	nni_mtx_lock(&ztn->zn_lk);
+	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
+		nni_plat_udp_recv(ztn->zn_udp, &ztn->zn_rcv_aio);
+	}
+	nni_mtx_unlock(&ztn->zn_lk);
 
 	printf("LOOKING GOOD?\n");
 	*ztnp = ztn;

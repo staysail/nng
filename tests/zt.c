@@ -21,6 +21,18 @@ extern int         nng_optid_zt_home;
 // Do not attach to it in production.
 #define NWID "a09acf02337b057b"
 
+#ifdef _WIN32
+
+int
+mkdir(const char *path, int mode)
+{
+	CreateDirectory(path, NULL);
+}
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#endif // WIN32
+
 TestMain("ZeroTier Transport", {
 
 	// trantest_test_all("tcp://127.0.0.1:%u");
@@ -54,12 +66,14 @@ TestMain("ZeroTier Transport", {
 			char        path[NNG_MAXADDRLEN];
 			trantest_next_address(path, "/tmp/zt_test_%u");
 
+			mkdir(path, 0700);
+
 			So(nng_listener_setopt(l, nng_optid_zt_home, path,
 			       strlen(path) + 1) == 0);
 
 			So(nng_listener_start(l, 0) == 0);
 
-			nng_usleep(1000000);
+			nng_usleep(10000000);
 		})
 	});
 #if 0

@@ -11,7 +11,9 @@
 #include "convey.h"
 #include "trantest.h"
 
-extern int nng_zt_register(void);
+extern int         nng_zt_register(void);
+extern const char *nng_opt_zt_home;
+extern int         nng_optid_zt_home;
 
 // zerotier tests.
 
@@ -35,14 +37,30 @@ TestMain("ZeroTier Transport", {
 		int          rv;
 
 		trantest_next_address(addr, "zt://" NWID ":%u");
-		printf("ADDRESS is %s\n", addr);
 
 		So(nng_pair_open(&s) == 0);
 		Reset({ nng_close(s); });
 
-		rv = nng_listener_create(&l, s, addr);
-		printf("RV is %d %s\n", rv, nng_strerror(rv));
-		So(rv == 0);
+		So(nng_listener_create(&l, s, addr) == 0);
+
+		Convey("We can lookup zerotier home option id", {
+			So(nng_optid_zt_home > 0);
+			So(nng_option_lookup(nng_opt_zt_home) ==
+			    nng_optid_zt_home);
+		});
+
+		Convey("And it can be started...", {
+			const char *tmp;
+			char        path[NNG_MAXADDRLEN];
+			trantest_next_address(path, "/tmp/zt_test_%u");
+
+			So(nng_listener_setopt(l, nng_optid_zt_home, path,
+			       strlen(path) + 1) == 0);
+
+			So(nng_listener_start(l, 0) == 0);
+
+			nng_usleep(1000000);
+		})
 	});
 #if 0
 	Convey("We cannot connect to wild cards", {

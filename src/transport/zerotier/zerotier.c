@@ -616,6 +616,7 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	zrv = ZT_Node_new(
 	    &ztn->zn_znode, ztn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
 	if (zrv != ZT_RESULT_OK) {
+		printf("NODE NEW FAILED %d\n", zrv);
 		nni_zt_node_destroy(ztn);
 		return (nni_zt_result(zrv));
 	}
@@ -624,6 +625,8 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 
 	// Schedule an initial background run.
 	nni_zt_node_resched(ztn, 1);
+
+	printf("LOOKING GOOD?\n");
 	*ztnp = ztn;
 	return (0);
 }
@@ -951,6 +954,7 @@ nni_zt_ep_bind(void *arg)
 		return (rv);
 	}
 	nni_list_append(&ztn->zn_eplist, ep);
+	ep->ze_ztnode = ztn;
 	nni_mtx_unlock(&nni_zt_lk);
 
 	return (0);
@@ -959,7 +963,7 @@ nni_zt_ep_bind(void *arg)
 static void
 nni_zt_ep_accept(void *arg, nni_aio *aio)
 {
-	nni_aio_finish(aio, NNG_ENOTSUP, 0);
+	//	nni_aio_finish(aio, NNG_ENOTSUP, 0);
 }
 
 static void

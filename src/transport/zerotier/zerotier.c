@@ -607,6 +607,11 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 		nni_zt_node_destroy(ztn);
 		return (rv);
 	}
+
+	// Setup for dynamic ephemeral port allocations.
+	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL_PORT, 0xffffffffU,
+	    NNI_ZT_EPHEMERAL_PORT);
+
 	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
 	zrv = ZT_Node_new(
 	    &ztn->zn_znode, ztn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
@@ -679,12 +684,12 @@ nni_zt_chkopt(int opt, const void *dat, size_t sz)
 {
 	if (opt == nng_optid_recvmaxsz) {
 		// We cannot deal with message sizes larger than 64k.
-		return (nni_chkopt_size(dat, sz, 0, 0xffff));
+		return (nni_chkopt_size(dat, sz, 0, 0xffffffffU));
 	}
 	if (opt == nng_optid_zt_home) {
 		size_t l = nni_strnlen(dat, sz);
 		if ((l >= sz) || (l >= NNG_MAXADDRLEN)) {
-			return (NNG_EADDRINVAL);
+			return (NNG_EINVAL);
 		}
 		// XXX: should we apply additional security checks?
 		// home path is not null terminated
@@ -797,7 +802,7 @@ nni_zt_parsehex(const char **sp, uint64_t *valp)
 
 	*sp   = s;
 	*valp = v;
-	return (n ? NNG_EINVAL : 0);
+	return (n ? 0 : NNG_EINVAL);
 }
 
 static int
@@ -813,7 +818,7 @@ nni_zt_parsedec(const char **sp, uint64_t *valp)
 		v += (c - '0');
 	}
 	*sp = s;
-	return (n ? NNG_EINVAL : 0);
+	return (n ? 0 : NNG_EINVAL);
 }
 
 static int
@@ -852,9 +857,9 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// We require zt://<nwid>/<remotenode>:<port>
 		// The remotenode must be a 40 bit address (max), and
 		// we require a non-zero port to connect to.
-		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u != '/') ||
+		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u++ != '/') ||
 		    (nni_zt_parsehex(&u, &node) != 0) ||
-		    (node > 0xffffffffff) || (*u != ':') ||
+		    (node > 0xffffffffff) || (*u++ != ':') ||
 		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
 		    (port == 0)) {
 			return (NNG_EADDRINVAL);
@@ -864,7 +869,7 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// Listen mode is just zt://<nwid>:<port>.  The port
 		// may be zero in this case, to indicate that the server
 		// should allocate an ephemeral port.
-		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u != ':') ||
+		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u++ != ':') ||
 		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0')) {
 			return (NNG_EADDRINVAL);
 		}
@@ -972,7 +977,8 @@ nni_zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 
 	if (opt == nng_optid_recvmaxsz) {
 		nni_mtx_lock(&ep->ze_lk);
-		rv = nni_setopt_size(&ep->ze_rcvmax, data, size, 0, 0xffff);
+		rv = nni_setopt_size(
+		    &ep->ze_rcvmax, data, size, 0, 0xffffffffu);
 		nni_mtx_unlock(&ep->ze_lk);
 	} else if (opt == nng_optid_zt_home) {
 		// XXX: check to make sure not started...
@@ -1061,7 +1067,7 @@ static struct nni_tran nni_zt_tran = {
 };
 
 int
-nni_zt_register(void)
+nng_zt_register(void)
 {
 	return (nni_tran_register(&nni_zt_tran));
 }

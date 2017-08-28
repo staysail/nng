@@ -148,6 +148,17 @@ struct nni_zt_pipe {
 	nni_mtx  zp_lk;
 };
 
+typedef struct nni_zt_creq nni_zt_creq;
+struct nni_zt_creq {
+	uint64_t cr_time;
+	uint64_t cr_peer_addr;
+	uint32_t cr_peer_port;
+	uint16_t cr_proto;
+};
+
+#define NNI_ZT_LISTENQ 128
+#define NNI_ZT_LISTEN_EXPIRE 60 // seconds before we give up in the backlog
+
 struct nni_zt_ep {
 	nni_list_node ze_link;
 	char          ze_url[NNG_MAXADDRLEN];
@@ -161,8 +172,17 @@ struct nni_zt_ep {
 	uint16_t      ze_proto;
 	size_t        ze_rcvmax;
 	nni_aio       ze_aio;
-	nni_aio *     ze_user_aio;
+	nni_list      ze_aios;
 	nni_mtx       ze_lk;
+
+	// Incoming connection requests (server only).  We only
+	// only have "accepted" requests -- that is we won't have an
+	// established connection/pipe unless the application calls
+	// accept.  Since the "application" is our library, that should
+	// be pretty much as fast we can run.
+	nni_zt_creq ze_creqs[NNI_ZT_LISTENQ];
+	int         ze_creq_head;
+	int         ze_creq_tail;
 };
 
 static nni_mtx  nni_zt_lk;
@@ -270,6 +290,46 @@ skip:
 		nni_plat_udp_recv(ztn->zn_udp, &ztn->zn_rcv_aio);
 	}
 	nni_mtx_unlock(&ztn->zn_lk);
+}
+
+static uint64_t
+nni_zt_mac_to_node(uint64_t mac, uint64_t nwid)
+{
+	uint64_t node;
+	// This extracts a node address from a mac addres.  The
+	// network ID is mixed in, and has to be extricated.  We
+	// the node ID is located in the lower 40 bits, and scrambled
+	// against the nwid.
+	node = mac & 0xffffffffffull;
+	node ^= ((nwid >> 8) & 0xff) << 32;
+	node ^= ((nwid >> 16) & 0xff) << 24;
+	node ^= ((nwid >> 24) & 0xff) << 16;
+	node ^= ((nwid >> 32) & 0xff) << 8;
+	node ^= (nwid >> 40) & 0xff;
+	return (node);
+}
+
+static uint64_t
+nni_zt_node_to_mac(uint64_t node, uint64_t nwid)
+{
+	uint64_t mac;
+	// We use LSB of network ID, and make sure that we clear
+	// multicast and set local administration -- this is the first
+	// octet of the 48 bit mac address.  We also avoid 0x52, which
+	// is known to be used in KVM, libvirt, etc.
+	mac = ((uint8_t)(nwid & 0xfe) | 0x02);
+	if (mac == 0x52) {
+		mac = 0x32;
+	}
+	mac <<= 40;
+	mac |= node;
+	// The rest of the network ID is XOR'd in, in reverse byte order.
+	mac ^= ((nwid >> 8) & 0xff) << 32;
+	mac ^= ((nwid >> 16) & 0xff) << 24;
+	mac ^= ((nwid >> 24) & 0xff) << 16;
+	mac ^= ((nwid >> 32) & 0xff) << 8;
+	mac ^= (nwid >> 40) & 0xff;
+	return (mac);
 }
 
 static int
@@ -884,6 +944,8 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	ep->ze_mode = mode;
 	sz          = sizeof(ep->ze_url);
 
+	nni_aio_list_init(&ep->ze_aios);
+
 	if ((strncmp(url, "zt://", strlen("zt://")) != 0) ||
 	    (nni_strlcpy(ep->ze_url, url, sz) >= sz)) {
 		return (NNG_EADDRINVAL);
@@ -934,8 +996,15 @@ nni_zt_ep_close(void *arg)
 {
 	nni_zt_ep *  ep = arg;
 	nni_zt_node *ztn;
+	nni_aio *    aio;
 
-	// XXX: cancel AIOs...
+	// Cancel any outstanding user operation(s)
+	nni_mtx_lock(&ep->ze_lk);
+	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
+		nni_aio_list_remove(aio);
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+	}
+	nni_mtx_unlock(&ep->ze_lk);
 
 	// Endpoint framework guarantees to only call us once, and to not
 	// call other things while we are closed.
@@ -999,9 +1068,73 @@ nni_zt_ep_bind(void *arg)
 }
 
 static void
+nni_zt_ep_cancel(nni_aio *aio, int rv)
+{
+	nni_zt_ep *ep = aio->a_prov_data;
+
+	nni_mtx_lock(&ep->ze_lk);
+	if (nni_aio_list_active(aio)) {
+		nni_aio_list_remove(aio);
+		nni_aio_finish_error(aio, rv);
+	}
+	nni_mtx_unlock(&ep->ze_lk);
+}
+
+static void
+nni_zt_ep_doaccept(nni_zt_ep *ep)
+{
+	// Call with ep lock held.
+	nni_time now;
+
+	now = nni_clock();
+	// Consume any timedout connect requests.
+	while (ep->ze_creq_tail != ep->ze_creq_head) {
+		nni_zt_creq creq;
+		nni_aio *   aio;
+
+		creq = ep->ze_creqs[ep->ze_creq_tail % NNI_ZT_LISTENQ];
+		// Discard old connection requests.
+		if (creq.cr_time < now) {
+			ep->ze_creq_tail++;
+			continue;
+		}
+
+		if ((aio = nni_list_first(&ep->ze_aios)) == NULL) {
+			// No outstanding accept.  We're done.
+			break;
+		}
+
+		// We have both a connection request, and a place to
+		// accept it.
+
+		// Advance the tail.
+		ep->ze_creq_tail++;
+
+		// We remove this AIO.  This keeps it from being canceled.
+		nni_aio_list_remove(aio);
+		nni_mtx_unlock(&ep->ze_lk);
+
+		// Now we need to create a pipe, send the notice to
+		// the user, and finish the request.  For now we are pretty
+		// lame and just return NNG_EINTERNAL.
+
+		nni_aio_finish_error(aio, NNG_EINTERNAL);
+
+		nni_mtx_lock(&ep->ze_lk);
+	}
+}
+
+static void
 nni_zt_ep_accept(void *arg, nni_aio *aio)
 {
-	//	nni_aio_finish(aio, NNG_ENOTSUP, 0);
+	nni_zt_ep *ep = arg;
+
+	nni_mtx_lock(&ep->ze_lk);
+	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
+		nni_aio_list_append(&ep->ze_aios, aio);
+	}
+	nni_zt_ep_doaccept(ep);
+	nni_mtx_unlock(&ep->ze_lk);
 }
 
 static void

@@ -29,7 +29,7 @@ int nng_optid_zt_nwid = -1;
 #include <ZeroTierOne.h>
 
 // ZeroTier Transport.  This sits on the ZeroTier L2 network, which itself
-// is implemented on top of L3 (mostly UDP).  This requires the 3rd party
+// is implemented on top of UDP.  This requires the 3rd party
 // libzerotiercore library (which is GPLv3!) and platform specific UDP
 // functionality to be built in.  Note that care must be taken to link
 // dynamically if one wishes to avoid making your entire application GPL3.
@@ -75,7 +75,14 @@ typedef struct nni_zt_node nni_zt_node;
 #define NNI_ZT_EMSGSIZE 0x05 // Message too large
 #define NNI_ZT_EUNKNOWN 0xff // Other errors
 
-#define NNI_ZT_EPHEMERAL_PORT (1U << 31)
+// Ephemeral ports are those with the high order bit set.  There are
+// about 8 million ephemeral ports, and about 8 million static ports.
+// We restrict ourselves to just 24 bit port numbers.  This lets us
+// construct 64-bit conversation IDs by combining the 24-bit port
+// number with the 40-bit node address.  This means that 64-bits can
+// be used to uniquely identify any address.
+#define NNI_ZT_EPHEMERAL_PORT (1U << 23)
+#define NNI_ZT_MAX_PORT ((1U << 24) - 1)
 
 // In theory UDP can send/recv 655507, but ZeroTier won't do more
 // than the ZT_MAX_MTU for it's virtual networks  So we need to add some
@@ -126,9 +133,10 @@ struct nni_zt_pipe {
 	size_t        zp_rcvmax;
 	nni_aio *     zp_user_txaio;
 	nni_aio *     zp_user_rxaio;
-	uint64_t      zp_conv_id;
 	uint32_t      zp_src_port;
 	uint32_t      zp_dst_port;
+	uint64_t      zp_self_conv;
+	uint64_t      zp_peer_conv;
 
 	// XXX: fraglist
 	nni_sockaddr zp_remaddr;
@@ -209,6 +217,7 @@ nni_zt_node_rcv_cb(void *arg)
 	struct nng_sockaddr_in6 *nsin6;
 	uint64_t                 now;
 
+	printf("NODE RECV CB called!\n");
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
 		// of any reason for this to legitimately fail.  Arguably
@@ -332,6 +341,7 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 {
 	nni_zt_node *ztn = userptr;
 
+	printf("VIRTUAL NET FRAME RECVD\n");
 	if (ethertype != NNI_ZT_ETHER) {
 		// This is a weird frame we can't use, just throw it away.
 		printf("DEBUG: WRONG ETHERTYPE %x\n", ethertype);
@@ -617,9 +627,14 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 		return (rv);
 	}
 
-	// Setup for dynamic ephemeral port allocations.
-	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL_PORT, 0xffffffffU,
-	    NNI_ZT_EPHEMERAL_PORT);
+	// Setup for dynamic ephemeral port allocations.  We set the range
+	// to allow for ephemeral ports, but not higher than the max port,
+	// and starting with an initial random value.  Note that this should
+	// give us about 8 million possible ephemeral ports.
+	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL_PORT,
+	    NNI_ZT_MAX_PORT,
+	    (nni_random() % (NNI_ZT_MAX_PORT - NNI_ZT_EPHEMERAL_PORT)) +
+	        NNI_ZT_EPHEMERAL_PORT);
 
 	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
 	zrv = ZT_Node_new(
@@ -886,7 +901,7 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		    (nni_zt_parsehex(&u, &node) != 0) ||
 		    (node > 0xffffffffff) || (*u++ != ':') ||
 		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
-		    (port == 0)) {
+		    (port > NNI_ZT_MAX_PORT) || (port == 0)) {
 			return (NNG_EADDRINVAL);
 		}
 		break;
@@ -895,7 +910,8 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// may be zero in this case, to indicate that the server
 		// should allocate an ephemeral port.
 		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u++ != ':') ||
-		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0')) {
+		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
+		    (port > NNI_ZT_MAX_PORT)) {
 			return (NNG_EADDRINVAL);
 		}
 		node = 0;
@@ -905,7 +921,7 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		break;
 	}
 
-	ep->ze_port = port;
+	ep->ze_port = (uint32_t) port;
 	ep->ze_node = node;
 	ep->ze_nwid = nwid;
 

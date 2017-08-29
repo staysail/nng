@@ -195,14 +195,14 @@ CONN messages
 
 `CONN` frames represent a session establishment.  They allow a peer to
 advertise its port number to a remote peer, and to verify that a peer
-is responsive.  The payload for the `CONN` frame is a 4 byte (big-endian)
+is responsive.  The payload for the `CONN` frame is a 2 byte (big-endian)
 value, consisting of the SP protocol ID of the sender:
 
-    0                   1                   2                   3
-    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      SP protocol ID                           |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    0                   1
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |         SP protocol ID          |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
 The connection is initiated by the initiator sending this message,
 with its own SP protocol ID.  The `AK` flag will in this case be clear.

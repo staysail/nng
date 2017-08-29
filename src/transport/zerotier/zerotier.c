@@ -81,7 +81,7 @@ typedef struct nni_zt_node nni_zt_node;
 // construct 64-bit conversation IDs by combining the 24-bit port
 // number with the 40-bit node address.  This means that 64-bits can
 // be used to uniquely identify any address.
-#define NNI_ZT_EPHEMERAL_PORT (1U << 23)
+#define NNI_ZT_EPHEMERAL (1U << 23)
 #define NNI_ZT_MAX_PORT ((1U << 24) - 1)
 
 // In theory UDP can send/recv 655507, but ZeroTier won't do more
@@ -104,9 +104,6 @@ struct nni_zt_node {
 	char          zn_path[NNG_MAXADDRLEN]; // ought to be sufficient
 	ZT_Node *     zn_znode;
 	uint64_t      zn_self;
-	uint64_t      zn_nwid;
-	int           zn_maxmtu;
-	int           zn_phymtu;
 	nni_list_node zn_link;
 	int           zn_refcnt;
 	int           zn_closed;
@@ -165,6 +162,8 @@ struct nni_zt_ep {
 	char          ze_home[NNG_MAXADDRLEN]; // should be enough
 	ZT_Node *     ze_ztnode;
 	uint64_t      ze_nwid;
+	uint64_t      ze_self;
+	uint64_t      ze_mac;  // our own mac address
 	uint64_t      ze_node; // remote node address normally
 	int           ze_mode;
 	nni_sockaddr  ze_addr;
@@ -174,6 +173,8 @@ struct nni_zt_ep {
 	nni_aio       ze_aio;
 	nni_list      ze_aios;
 	nni_mtx       ze_lk;
+	int           ze_maxmtu;
+	int           ze_phymtu;
 
 	// Incoming connection requests (server only).  We only
 	// only have "accepted" requests -- that is we won't have an
@@ -187,6 +188,8 @@ struct nni_zt_ep {
 
 static nni_mtx  nni_zt_lk;
 static nni_list nni_zt_nodes;
+
+static void nni_zt_node_rele(nni_zt_node *);
 
 static void
 nni_zt_bgthr(void *arg)
@@ -364,30 +367,41 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
     const ZT_VirtualNetworkConfig *config)
 {
 	nni_zt_node *ztn = userptr;
+	nni_zt_ep *  ep;
 
 	NNI_ARG_UNUSED(node);
 	NNI_ARG_UNUSED(threadptr);
 	NNI_ARG_UNUSED(netid);
 	NNI_ARG_UNUSED(netptr);
 
-	printf("VT NET CONFIG!!!! %d\n", op);
-
 	// Maybe we don't have to create taps or anything like that.
 	// We do get our mac and MTUs from this, so there's that.
-	nni_mtx_lock(&ztn->zn_lk);
 	switch (op) {
 	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_UP:
 	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_CONFIG_UPDATE:
-		ztn->zn_self   = config->mac;
-		ztn->zn_nwid   = config->nwid;
-		ztn->zn_maxmtu = config->mtu;
-		ztn->zn_phymtu = config->physicalMtu;
-		printf("LOOKS UP to ME!\n");
+
+		// We only really care about changes to the MTU.  From
+		// an API perspective the MAC could change, but that cannot
+		// really happen because the node identity and the nwid are
+		// fixed.
+		nni_mtx_lock(&ztn->zn_lk);
+		NNI_LIST_FOREACH (&ztn->zn_eplist, ep) {
+			if (ep->ze_nwid != config->nwid) {
+				continue;
+			}
+			nni_mtx_lock(&ep->ze_lk);
+			ep->ze_maxmtu = config->mtu;
+			ep->ze_phymtu = config->physicalMtu;
+			printf("DEBUG: Updated MTU %d, phy MTU is %d\n",
+			    ep->ze_maxmtu, ep->ze_phymtu);
+			NNI_ASSERT(ep->ze_mac == config->mac);
+			nni_mtx_unlock(&ep->ze_lk);
+		}
+		nni_mtx_unlock(&ztn->zn_lk);
 		break;
 	default:
 		break;
 	}
-	nni_mtx_unlock(&ztn->zn_lk);
 	return (0);
 }
 
@@ -399,7 +413,12 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
     unsigned int ethertype, unsigned int vlanid, const void *data,
     unsigned int len)
 {
-	nni_zt_node *ztn = userptr;
+	nni_zt_node *  ztn = userptr;
+	uint8_t        opflags;
+	const uint8_t *p = data;
+	uint16_t       proto;
+	uint32_t       srcport;
+	uint32_t       dstport;
 
 	printf("VIRTUAL NET FRAME RECVD\n");
 	if (ethertype != NNI_ZT_ETHER) {
@@ -407,15 +426,70 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 		printf("DEBUG: WRONG ETHERTYPE %x\n", ethertype);
 		return;
 	}
+
+#if 0
+	// We should not need to check this, because ZT should ensure we
+	// only get messages that are actually directed to us.  We do need
+	// to accept that we may have multiple network ids.
 	nni_mtx_lock(&ztn->zn_lk);
 	if ((ztn->zn_self != dstmac) || (ztn->zn_nwid != netid)) {
 		nni_mtx_unlock(&ztn->zn_lk);
 		return;
 	}
 	nni_mtx_unlock(&ztn->zn_lk);
-	// XXX: arguably we should check the dstmac...
+#endif
 
+	if (len < 10) {
+		printf("DEBUG: RUNT len %d", len);
+		return;
+	}
+
+	// XXX: arguably we should check the dstmac...
 	// XXX: check frame type.
+
+	opflags = *p++;
+	if (*p++ != NNI_ZT_VERSION) {
+		// Wrong version, drop it.  (Log?)
+		printf("DEBUG: BAD ZT_VERSION %2x", p[1]);
+		return;
+	}
+
+	if ((p[0] != 0) || (p[4] != 0)) {
+		printf("DEBUG: RESERVED FIELDS NOT ZERO!");
+	}
+
+	NNI_GET32(p, dstport);
+	p += sizeof(uint32_t);
+	NNI_GET32(p, srcport);
+	p += sizeof(uint32_t);
+
+	// p now points to payload.  Reduce the length.
+	len -= 10;
+
+	switch (opflags & 0xf0) {
+	case NNI_ZT_OP_CON:
+		if (len < 2) {
+			printf("DEBUG: Missing protocol number in CON");
+			return;
+		}
+		NNI_GET16(p, proto);
+
+		// Lets see if we have an endpoint..
+		nni_mtx_lock(&ztn->zn_lk);
+		nni_mtx_unlock(&ztn->zn_lk);
+		break;
+	// XXX: incoming connection request.
+	case NNI_ZT_OP_DIS:
+	// XXX: look for a matching convo, and close it.
+	case NNI_ZT_OP_ERR:
+	// XXX: look for a matching convo, and fail it, or if we have
+	// a connect request pending, fail that
+	case NNI_ZT_OP_PNG:
+	// XXX: look for a matching convo, and send a ping.
+	default:
+		printf("DEBUG: BAD ZT_OP %x", opflags);
+		return;
+	}
 }
 
 static void
@@ -461,7 +535,6 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
-		printf("NOPE!\n");
 		return;
 	}
 	printf("FNAME is %s\n", fname);
@@ -595,8 +668,9 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 
 	nni_mtx_lock(&ztn->zn_lk);
 	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
-		// This should be non-blocking/best-effort, so while not
-		// great that we're holding the lock, also not tragic.
+		// This should be non-blocking/best-effort, so while
+		// not great that we're holding the lock, also not
+		// tragic.
 		nni_plat_udp_send(ztn->zn_udp, &aio);
 	}
 	nni_mtx_unlock(&ztn->zn_lk);
@@ -691,10 +765,9 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	// to allow for ephemeral ports, but not higher than the max port,
 	// and starting with an initial random value.  Note that this should
 	// give us about 8 million possible ephemeral ports.
-	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL_PORT,
-	    NNI_ZT_MAX_PORT,
-	    (nni_random() % (NNI_ZT_MAX_PORT - NNI_ZT_EPHEMERAL_PORT)) +
-	        NNI_ZT_EPHEMERAL_PORT);
+	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL, NNI_ZT_MAX_PORT,
+	    (nni_random() % (NNI_ZT_MAX_PORT - NNI_ZT_EPHEMERAL)) +
+	        NNI_ZT_EPHEMERAL);
 
 	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
 	zrv = ZT_Node_new(
@@ -704,6 +777,8 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 		nni_zt_node_destroy(ztn);
 		return (nni_zt_result(zrv));
 	}
+
+	ztn->zn_self = ZT_Node_address(ztn->zn_znode);
 
 	nni_thr_run(&ztn->zn_bgthr);
 
@@ -731,10 +806,9 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 static int
 nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 {
-	nni_zt_node *      ztn;
-	enum ZT_ResultCode zrv;
-	int                rv;
-	nng_sockaddr       sa;
+	nni_zt_node *ztn;
+	int          rv;
+	nng_sockaddr sa;
 
 	nni_mtx_lock(&nni_zt_lk);
 	NNI_LIST_FOREACH (&nni_zt_nodes, ztn) {
@@ -759,6 +833,7 @@ nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 	*ztnp = ztn;
 	nni_list_append(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
+
 	return (0);
 }
 
@@ -941,8 +1016,10 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	// The <remoteaddr> part is required for remote dialers, but
 	// is not used at all for listeners.  (We have no notion of binding
 	// to different node addresses.)
-	ep->ze_mode = mode;
-	sz          = sizeof(ep->ze_url);
+	ep->ze_mode   = mode;
+	ep->ze_maxmtu = ZT_MAX_MTU;
+	ep->ze_phymtu = ZT_MIN_MTU;
+	sz            = sizeof(ep->ze_url);
 
 	nni_aio_list_init(&ep->ze_aios);
 
@@ -1024,6 +1101,32 @@ nni_zt_ep_close(void *arg)
 }
 
 static int
+nni_zt_ep_join(nni_zt_ep *ep)
+{
+	enum ZT_ResultCode       zrv;
+	nni_zt_node *            ztn = ep->ze_ztnode;
+	ZT_VirtualNetworkConfig *config;
+
+	if ((zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL)) !=
+	    ZT_RESULT_OK) {
+		nni_zt_node_rele(ztn);
+		return (nni_zt_result(zrv));
+	}
+
+	if ((config = ZT_Node_networkConfig(ztn->zn_znode, ep->ze_nwid)) !=
+	    NULL) {
+		NNI_ASSERT(config->nwid == ep->ze_nwid);
+		ep->ze_maxmtu = config->mtu;
+		ep->ze_phymtu = config->physicalMtu;
+		printf("JOIN MTU is %d, phy MTU is %d\n", ep->ze_maxmtu,
+		    ep->ze_phymtu);
+		NNI_ASSERT(ep->ze_mac == config->mac);
+		ZT_Node_freeQueryResult(ztn->zn_znode, config);
+	}
+	return (0);
+}
+
+static int
 nni_zt_ep_bind(void *arg)
 {
 	int          rv;
@@ -1034,8 +1137,8 @@ nni_zt_ep_bind(void *arg)
 	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
 		return (rv);
 	}
-	nni_mtx_lock(&nni_zt_lk);
 
+	nni_mtx_lock(&nni_zt_lk);
 	// Look to ensure we have an exclusive bind.
 	if (nni_idhash_find(ztn->zn_eps, ep->ze_port, (void **) &srch) == 0) {
 		nni_mtx_unlock(&nni_zt_lk);
@@ -1047,8 +1150,8 @@ nni_zt_ep_bind(void *arg)
 		// ask for an ephemeral port
 		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
 		if (rv == 0) {
-			NNI_ASSERT(port < (1ULL << 32));
-			NNI_ASSERT(port & NNI_ZT_EPHEMERAL_PORT);
+			NNI_ASSERT(port < NNI_ZT_MAX_PORT);
+			NNI_ASSERT(port & NNI_ZT_EPHEMERAL);
 			ep->ze_port = (uint32_t) port;
 		}
 	} else {
@@ -1061,8 +1164,12 @@ nni_zt_ep_bind(void *arg)
 		return (rv);
 	}
 	nni_list_append(&ztn->zn_eplist, ep);
+	ep->ze_self   = ztn->zn_self;
+	ep->ze_mac    = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
 	ep->ze_ztnode = ztn;
 	nni_mtx_unlock(&nni_zt_lk);
+
+	(void) nni_zt_ep_join(ep);
 
 	return (0);
 }
@@ -1132,15 +1239,50 @@ nni_zt_ep_accept(void *arg, nni_aio *aio)
 	nni_mtx_lock(&ep->ze_lk);
 	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
 		nni_aio_list_append(&ep->ze_aios, aio);
+		nni_zt_ep_doaccept(ep);
 	}
-	nni_zt_ep_doaccept(ep);
 	nni_mtx_unlock(&ep->ze_lk);
 }
 
 static void
 nni_zt_ep_connect(void *arg, nni_aio *aio)
 {
-	nni_aio_finish(aio, NNG_ENOTSUP, 0);
+	nni_zt_ep *  ep = arg;
+	uint64_t     port;
+	nni_zt_node *ztn;
+	int          rv;
+
+	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
+		nni_aio_finish_error(aio, rv);
+		return;
+	}
+
+	// Allocate an ephemeral port.  We will keep this one forever.
+	nni_mtx_lock(&nni_zt_lk);
+	if (ep->ze_port == 0) {
+		// ask for an ephemeral port
+		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
+		if (rv == 0) {
+			NNI_ASSERT(port <= NNI_ZT_MAX_PORT);
+			NNI_ASSERT(port & NNI_ZT_EPHEMERAL);
+			ep->ze_port = (uint32_t) port;
+		}
+		nni_list_append(&ztn->zn_eplist, ep);
+	}
+	nni_mtx_unlock(&nni_zt_lk);
+
+	nni_mtx_lock(&ep->ze_lk);
+	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
+		nni_aio_list_append(&ep->ze_aios, aio);
+	}
+	ep->ze_ztnode = ztn;
+	ep->ze_self   = ztn->zn_self;
+	ep->ze_mac    = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+	nni_mtx_unlock(&ep->ze_lk);
+
+	(void) nni_zt_ep_join(ep);
+
+	// XXX: send out the connect message.
 }
 
 static int

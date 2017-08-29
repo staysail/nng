@@ -44,6 +44,8 @@ TestMain("ZeroTier Transport", {
 	trantest_prev_address(path2, "/tmp/zt_clnt_%u");
 	port = trantest_port - 1;
 
+	atexit(nng_fini);
+
 	Convey("We can register the zero tier transport", {
 		So(nng_zt_register() == 0);
 		printf("nng_zt_register done!\n");
@@ -143,6 +145,4 @@ TestMain("ZeroTier Transport", {
 		So(nng_dial(s2, addr, NULL, 0) == 0);
 	});
 #endif
-
-	nng_fini();
 })

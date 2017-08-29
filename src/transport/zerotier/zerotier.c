@@ -67,7 +67,29 @@ typedef struct nni_zt_node nni_zt_node;
 #define NNI_ZT_FLAG_MF 0x01 // more fragments
 #define NNI_ZT_FLAG_AK 0x02 // acknowledgement
 
+#define NNI_ZT_OP_CON_REQ (NNI_ZT_OP_CON)
+#define NNI_ZT_OP_CON_ACK (NNI_ZT_OP_CON | NNI_ZT_FLAG_AK)
+#define NNI_ZT_OP_PNG_REQ (NNI_ZT_OP_PNG)
+#define NNI_ZT_OP_PNG_ACK (NNI_ZT_OP_PNG | NNI_ZT_FLAG_AK)
+
 #define NNI_ZT_VERSION 0x01 // specified per RFC
+
+#define NNI_ZT_OFFS_OPFLAGS 0
+#define NNI_ZT_OFFS_VERSION 1
+#define NNI_ZT_OFFS_DST_PORT 2 // includes reserved high order bits
+#define NNI_ZT_OFFS_SRC_PORT 6 // includes reserved high order bits
+
+#define NNI_ZT_OFFS_CON_PROT 10
+#define NNI_ZT_SIZE_CON 12
+
+#define NNI_ZT_OFFS_DAT_MSGID 10
+#define NNI_ZT_OFFS_DAT_FRLEN 12
+#define NNI_ZT_OFFS_DAT_FROFF 14
+#define NNI_ZT_OFFS_DAT_DATA 16
+#define NNI_ZT_SIZE_DAT 16 // does not include the user data
+
+#define NNI_ZT_OFFS_ERR_CODE 10
+#define NNI_ZT_OFFS_ERR_MSG 11
 
 #define NNI_ZT_EREFUSED 0x01 // Nothing there, connection refused
 #define NNI_ZT_ENOTCONN 0x02 // Connection does not exist
@@ -175,14 +197,15 @@ struct nni_zt_ep {
 	nni_list_node ze_link;
 	char          ze_url[NNG_MAXADDRLEN];
 	char          ze_home[NNG_MAXADDRLEN]; // should be enough
-	ZT_Node *     ze_ztnode;
+	nni_zt_node * ze_ztnode;
 	uint64_t      ze_nwid;
 	uint64_t      ze_self;
 	uint64_t      ze_mac;  // our own mac address
 	uint64_t      ze_node; // remote node address normally
 	int           ze_mode;
 	nni_sockaddr  ze_addr;
-	uint32_t      ze_port;
+	uint32_t      ze_rport;
+	uint32_t      ze_lport;
 	uint16_t      ze_proto;
 	size_t        ze_rcvmax;
 	nni_aio       ze_aio;
@@ -420,6 +443,57 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 	return (0);
 }
 
+static void
+nni_zt_send_err(nni_zt_node *ztn, uint64_t nwid, uint64_t dstnode,
+    uint32_t srcport, uint32_t dstport, uint8_t err, char *msg)
+{
+	uint8_t  data[128];
+	uint64_t srcmac = nni_zt_node_to_mac(ztn->zn_self, nwid);
+	uint64_t dstmac = nni_zt_node_to_mac(dstnode, nwid);
+	uint64_t now;
+
+	NNI_ASSERT((strlen(msg) + NNI_ZT_OFFS_ERR_MSG) < sizeof(data));
+
+	data[NNI_ZT_OFFS_OPFLAGS] = NNI_ZT_OP_ERR;
+	data[NNI_ZT_OFFS_VERSION] = NNI_ZT_VERSION;
+	NNI_PUT32(data + NNI_ZT_OFFS_DST_PORT, dstport);
+	NNI_PUT32(data + NNI_ZT_OFFS_SRC_PORT, srcport);
+	data[NNI_ZT_OFFS_ERR_CODE] = err;
+	nni_strlcpy((char *) data + NNI_ZT_OFFS_ERR_MSG, msg,
+	    sizeof(data) - NNI_ZT_OFFS_ERR_MSG);
+
+	now = nni_clock() / 1000;
+	ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now, nwid,
+	    srcmac, dstmac, NNI_ZT_ETHER, 0, data,
+	    strlen(msg) + NNI_ZT_OFFS_ERR_MSG, &now);
+
+	nni_zt_node_resched(ztn->zn_znode, now);
+}
+
+static void
+nni_zt_send_creq(nni_zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
+{
+	uint8_t  data[NNI_ZT_OFFS_CON_PROT + sizeof(uint16_t)];
+	uint64_t srcmac = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+	uint64_t dstmac = nni_zt_node_to_mac(dstnode, ep->ze_nwid);
+	uint64_t now;
+
+	data[NNI_ZT_OFFS_OPFLAGS] =
+	    ack ? NNI_ZT_OP_CON_ACK : NNI_ZT_OP_CON_REQ;
+	data[NNI_ZT_OFFS_VERSION] = NNI_ZT_VERSION;
+	NNI_PUT32(data + NNI_ZT_OFFS_DST_PORT, dstport);
+	NNI_PUT32(data + NNI_ZT_OFFS_SRC_PORT, ep->ze_lport);
+	NNI_PUT16(data + NNI_ZT_OFFS_CON_PROT, ep->ze_proto);
+
+	printf("sending to mac %llx\n", dstmac);
+	now = nni_clock() / 1000;
+	ZT_Node_processVirtualNetworkFrame(ep->ze_ztnode->zn_znode, NULL, now,
+	    ep->ze_nwid, srcmac, dstmac, NNI_ZT_ETHER, 0, data,
+	    NNI_ZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
+
+	nni_zt_node_resched(ep->ze_ztnode, now);
+}
+
 // This function is called when a frame arrives on the *virtual*
 // network.
 static void
@@ -434,6 +508,13 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	uint16_t       proto;
 	uint32_t       srcport;
 	uint32_t       dstport;
+	uint64_t       srcconv;
+	uint64_t       dstconv;
+	uint64_t       srcnode;
+	uint64_t       dstnode;
+
+	dstnode = nni_zt_mac_to_node(dstmac, netid);
+	srcnode = nni_zt_mac_to_node(srcmac, netid);
 
 	printf("VIRTUAL NET FRAME RECVD\n");
 	if (ethertype != NNI_ZT_ETHER) {
@@ -454,7 +535,7 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	nni_mtx_unlock(&ztn->zn_lk);
 #endif
 
-	if (len < 10) {
+	if (len < (NNI_ZT_OFFS_SRC_PORT + 4)) {
 		printf("DEBUG: RUNT len %d", len);
 		return;
 	}
@@ -462,32 +543,62 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	// XXX: arguably we should check the dstmac...
 	// XXX: check frame type.
 
-	opflags = *p++;
-	if (*p++ != NNI_ZT_VERSION) {
+	opflags = p[NNI_ZT_OFFS_OPFLAGS];
+	if (p[NNI_ZT_OFFS_VERSION] != NNI_ZT_VERSION) {
 		// Wrong version, drop it.  (Log?)
 		printf("DEBUG: BAD ZT_VERSION %2x", p[1]);
 		return;
 	}
 
-	if ((p[0] != 0) || (p[4] != 0)) {
-		printf("DEBUG: RESERVED FIELDS NOT ZERO!");
+	NNI_GET32(p + NNI_ZT_OFFS_DST_PORT, dstport);
+	if ((dstport > NNI_ZT_MAX_PORT) || (dstport < 1)) {
+		printf("DEBUG: INVALID destination port\n");
+		return;
+	}
+	NNI_GET32(p + NNI_ZT_OFFS_SRC_PORT, srcport);
+	if ((srcport > NNI_ZT_MAX_PORT) || (srcport < 1)) {
+		printf("DEBUG: INVALID source port\n");
+		return;
 	}
 
-	NNI_GET32(p, dstport);
-	p += sizeof(uint32_t);
-	NNI_GET32(p, srcport);
-	p += sizeof(uint32_t);
+	dstconv = (dstnode << 24) | dstport;
+	srcconv = (srcnode << 24) | srcport;
 
-	// p now points to payload.  Reduce the length.
-	len -= 10;
+	switch (opflags) {
+	case NNI_ZT_OP_CON_REQ:
+	// Look for a matching listener.  If one is found, create a
+	// pipe, send an ack.
+	case NNI_ZT_OP_CON_ACK:
+	// Three cases:
+	// 1. Matching waiting dialer.  In this case, create the pipe,
+	//    (ready for sending), and send an ack to the listener.
+	// 2. Matching waiting listener.  In this case a pipe should
+	//    exist, so just mark it ready for sending.  (It could
+	//    already receive.)  Arguably if we received a message,
+	//    we wouldn't need the CON_ACK.
+	// 3. No endpoint.  Send an error.
+	case NNI_ZT_OP_PNG_REQ:
+	// Look for matching pipe.  If none found, send an error, otherwise
+	// send an ack.  Update timestamps.
+	case NNI_ZT_OP_PNG_ACK:
+	// Update timestamps, no further action.
+	case NNI_ZT_OP_DIS:
+	// Look for matching pipe.  If found, disconnect.  (Maybe disconnect
+	// pending connreq too?)
+	case NNI_ZT_OP_DAT:
+	case NNI_ZT_OP_DAT | NNI_ZT_FLAG_MF:
+	case NNI_ZT_OP_ERR:
+	default:
+		printf("DEBUG: BAD ZT_OP %x", opflags);
+	}
 
 	switch (opflags & 0xf0) {
 	case NNI_ZT_OP_CON:
-		if (len < 2) {
+		if (len < NNI_ZT_OFFS_CON_PROT + 2) {
 			printf("DEBUG: Missing protocol number in CON");
 			return;
 		}
-		NNI_GET16(p, proto);
+		NNI_GET16(p + NNI_ZT_OFFS_CON_PROT, proto);
 
 		// Lets see if we have an endpoint..
 		nni_mtx_lock(&ztn->zn_lk);
@@ -500,7 +611,8 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	// XXX: look for a matching convo, and fail it, or if we have
 	// a connect request pending, fail that
 	case NNI_ZT_OP_PNG:
-	// XXX: look for a matching convo, and send a ping.
+	// XXX: look for a matching convo, and send a ping ack (updating
+	// things).
 	default:
 		printf("DEBUG: BAD ZT_OP %x", opflags);
 		return;
@@ -866,6 +978,7 @@ nni_zt_node_rele(nni_zt_node *ztn)
 	nni_list_remove(&nni_zt_nodes, ztn);
 	nni_mtx_unlock(&nni_zt_lk);
 
+	printf("DESTROYING NODE %p\n", ztn);
 	nni_zt_node_destroy(ztn);
 }
 
@@ -1059,6 +1172,8 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		    (port > NNI_ZT_MAX_PORT) || (port == 0)) {
 			return (NNG_EADDRINVAL);
 		}
+		ep->ze_lport = 0;
+		ep->ze_rport = (uint32_t) port;
 		break;
 	case NNI_EP_MODE_LISTEN:
 		// Listen mode is just zt://<nwid>:<port>.  The port
@@ -1069,14 +1184,15 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		    (port > NNI_ZT_MAX_PORT)) {
 			return (NNG_EADDRINVAL);
 		}
-		node = 0;
+		node         = 0;
+		ep->ze_rport = 0;
+		ep->ze_lport = (uint32_t) port;
 		break;
 	default:
 		NNI_ASSERT(0);
 		break;
 	}
 
-	ep->ze_port = (uint32_t) port;
 	ep->ze_node = node;
 	ep->ze_nwid = nwid;
 
@@ -1106,7 +1222,7 @@ nni_zt_ep_close(void *arg)
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
-		nni_idhash_remove(ztn->zn_eps, ep->ze_port);
+		nni_idhash_remove(ztn->zn_eps, ep->ze_lport);
 	}
 	nni_mtx_unlock(&nni_zt_lk);
 
@@ -1147,7 +1263,6 @@ nni_zt_ep_bind(void *arg)
 {
 	int          rv;
 	nni_zt_ep *  ep = arg;
-	nni_zt_ep *  srch;
 	nni_zt_node *ztn;
 
 	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
@@ -1155,24 +1270,27 @@ nni_zt_ep_bind(void *arg)
 	}
 
 	nni_mtx_lock(&nni_zt_lk);
-	// Look to ensure we have an exclusive bind.
-	if (nni_idhash_find(ztn->zn_eps, ep->ze_port, (void **) &srch) == 0) {
-		nni_mtx_unlock(&nni_zt_lk);
-		nni_zt_node_rele(ztn);
-		return (NNG_EADDRINUSE);
-	}
-	if (ep->ze_port == 0) {
+	if (ep->ze_lport == 0) {
 		uint64_t port;
 		// ask for an ephemeral port
 		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
 		if (rv == 0) {
 			NNI_ASSERT(port < NNI_ZT_MAX_PORT);
 			NNI_ASSERT(port & NNI_ZT_EPHEMERAL);
-			ep->ze_port = (uint32_t) port;
+			ep->ze_lport = (uint32_t) port;
 		}
 	} else {
+		nni_zt_ep *srch;
+		// Make sure our port is not already in use.
+		if (nni_idhash_find(
+		        ztn->zn_eps, ep->ze_lport, (void **) &srch) == 0) {
+			nni_mtx_unlock(&nni_zt_lk);
+			nni_zt_node_rele(ztn);
+			return (NNG_EADDRINUSE);
+		}
+
 		// we have a specific port to use
-		rv = nni_idhash_insert(ztn->zn_eps, ep->ze_port, ep);
+		rv = nni_idhash_insert(ztn->zn_eps, ep->ze_lport, ep);
 	}
 	if (rv != 0) {
 		nni_mtx_unlock(&nni_zt_lk);
@@ -1275,13 +1393,13 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 
 	// Allocate an ephemeral port.  We will keep this one forever.
 	nni_mtx_lock(&nni_zt_lk);
-	if (ep->ze_port == 0) {
+	if (ep->ze_lport == 0) {
 		// ask for an ephemeral port
 		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
 		if (rv == 0) {
 			NNI_ASSERT(port <= NNI_ZT_MAX_PORT);
 			NNI_ASSERT(port & NNI_ZT_EPHEMERAL);
-			ep->ze_port = (uint32_t) port;
+			ep->ze_lport = (uint32_t) port;
 		}
 		nni_list_append(&ztn->zn_eplist, ep);
 	}
@@ -1303,6 +1421,7 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 
 	(void) nni_zt_ep_join(ep);
 
+	nni_zt_send_creq(ep, ep->ze_node, ep->ze_rport, 0);
 	// XXX: send out the connect message.
 }
 

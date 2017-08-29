@@ -222,7 +222,11 @@ Alternatively, a responder may reject the connection attempt by
 sending a suitably formed ERR message (see below).
 
 If a sender does not receive a reply, it SHOULD retry this message
-before giving up and reporting an error to the user.
+before giving up and reporting an error to the user.  It is recommended
+that a configurable number of retries and time interval be used.
+Given modern Internet latencies of generally less than 500 ms, resending
+up to 5 CONN requests, once every second, before giving up seems
+reasonable.
 
 If a `CONN` frame is received for a session that already exists, the
 receiver MUST reply.  Further, the source port it replies with, and

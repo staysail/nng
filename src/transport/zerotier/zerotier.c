@@ -18,6 +18,7 @@
 
 const char *nng_opt_zt_home = "zt:home";
 const char *nng_opt_zt_nwid = "zt:nwid";
+const char *nng_opt_zt_node = "zt:node";
 
 int nng_optid_zt_home = -1;
 int nng_optid_zt_nwid = -1;
@@ -83,6 +84,20 @@ typedef struct nni_zt_node nni_zt_node;
 // be used to uniquely identify any address.
 #define NNI_ZT_EPHEMERAL (1U << 23)
 #define NNI_ZT_MAX_PORT ((1U << 24) - 1)
+
+// Connection timeout maximum.  Basically we expect that a remote host
+// will respond within this many usecs to a connection request.  Note
+// that on Linux TCP connection timeouts are about 20s, and on othe systems
+// they are about 72s.  This seems rather ridiculously long.  Modern
+// Internet latencies generally never exceed 500ms, and processes should
+// not be MIA for more than a few hundred ms as well.
+
+// Connection retry and timeouts.  We send a connection attempt up to
+// five times, before giving up and reporting to the user.  Each attempt
+// is separated from the previous by one second.
+#define NNI_ZT_CONN_ATTEMPTS (5)
+#define NNI_ZT_CONN_INTERVAL (1000000)
+#define NNI_ZT_CONN_MAXTIME ((NNI_ZT_CONN_ATTEMPTS + 1) * NNI_ZT_CONN_INTERVAL)
 
 // In theory UDP can send/recv 655507, but ZeroTier won't do more
 // than the ZT_MAX_MTU for it's virtual networks  So we need to add some
@@ -992,7 +1007,8 @@ nni_zt_parsedec(const char **sp, uint64_t *valp)
 		v *= 10;
 		v += (c - '0');
 	}
-	*sp = s;
+	*sp   = s;
+	*valp = v;
 	return (n ? 0 : NNG_EINVAL);
 }
 
@@ -1034,11 +1050,11 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	switch (mode) {
 	case NNI_EP_MODE_DIAL:
 		// We require zt://<nwid>/<remotenode>:<port>
-		// The remotenode must be a 40 bit address (max), and
+		// The remote node must be a 40 bit address (max), and
 		// we require a non-zero port to connect to.
 		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u++ != '/') ||
 		    (nni_zt_parsehex(&u, &node) != 0) ||
-		    (node > 0xffffffffff) || (*u++ != ':') ||
+		    (node > 0xffffffffffull) || (*u++ != ':') ||
 		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
 		    (port > NNI_ZT_MAX_PORT) || (port == 0)) {
 			return (NNG_EADDRINVAL);
@@ -1272,6 +1288,11 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&nni_zt_lk);
 
 	nni_mtx_lock(&ep->ze_lk);
+	// Force a maximum timeout for connect.
+	// XXX: This should probably be tunable.
+	if (aio->a_expire > (nni_clock() + NNI_ZT_CONN_MAXTIME)) {
+		aio->a_expire = nni_clock() + NNI_ZT_CONN_MAXTIME;
+	}
 	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
 		nni_aio_list_append(&ep->ze_aios, aio);
 	}
@@ -1326,26 +1347,13 @@ nni_zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 		rv = nni_getopt_size(&ep->ze_rcvmax, data, sizep);
 		nni_mtx_unlock(&ep->ze_lk);
 	} else if (opt == nng_optid_zt_home) {
-		// XXX: we really want a helper for string data.
 		nni_mtx_lock(&ep->ze_lk);
-		size_t sz = strlen(ep->ze_home);
-		if (sz > *sizep) {
-			sz = *sizep;
-		}
-		*sizep = strlen(ep->ze_home);
-		nni_mtx_lock(&ep->ze_lk);
-		memcpy(data, ep->ze_home, sz);
-		rv = 0;
-	} else if (opt == nng_optid_zt_nwid) {
-		size_t sz = sizeof(uint64_t);
-		if (sz > *sizep) {
-			sz = *sizep;
-		}
-		*sizep = sizeof(uint64_t);
-		nni_mtx_lock(&ep->ze_lk);
-		memcpy(&ep->ze_nwid, data, sz);
+		rv = nni_getopt_str(ep->ze_home, data, sizep);
 		nni_mtx_unlock(&ep->ze_lk);
-		rv = 0;
+	} else if (opt == nng_optid_zt_nwid) {
+		nni_mtx_lock(&ep->ze_lk);
+		rv = nni_getopt_u64(ep->ze_nwid, data, sizep);
+		nni_mtx_unlock(&ep->ze_lk);
 	}
 	return (rv);
 }

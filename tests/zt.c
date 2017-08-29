@@ -36,6 +36,13 @@ mkdir(const char *path, int mode)
 TestMain("ZeroTier Transport", {
 
 	// trantest_test_all("tcp://127.0.0.1:%u");
+	char     path1[NNG_MAXADDRLEN];
+	char     path2[NNG_MAXADDRLEN];
+	unsigned port;
+
+	trantest_next_address(path1, "/tmp/zt_serv_%u");
+	trantest_prev_address(path2, "/tmp/zt_clnt_%u");
+	port = trantest_port - 1;
 
 	Convey("We can register the zero tier transport", {
 		So(nng_zt_register() == 0);
@@ -48,7 +55,7 @@ TestMain("ZeroTier Transport", {
 		char         addr[NNG_MAXADDRLEN];
 		int          rv;
 
-		trantest_next_address(addr, "zt://" NWID ":%u");
+		snprintf(addr, sizeof(addr), "zt://" NWID ":%u", port);
 
 		So(nng_pair_open(&s) == 0);
 		Reset({ nng_close(s); });
@@ -62,20 +69,50 @@ TestMain("ZeroTier Transport", {
 		});
 
 		Convey("And it can be started...", {
-			const char *tmp;
-			char        path[NNG_MAXADDRLEN];
-			trantest_next_address(path, "/tmp/zt_test_%u");
 
-			mkdir(path, 0700);
+			mkdir(path1, 0700);
 
-			So(nng_listener_setopt(l, nng_optid_zt_home, path,
-			       strlen(path) + 1) == 0);
+			So(nng_listener_setopt(l, nng_optid_zt_home, path1,
+			       strlen(path1) + 1) == 0);
 
 			So(nng_listener_start(l, 0) == 0);
 
-			nng_usleep(10000000);
+			nng_usleep(5000000);
 		})
 	});
+
+	Convey("We can create a zt dialer", {
+		nng_dialer d;
+		nng_socket s;
+		char       addr[NNG_MAXADDRLEN];
+		int        rv;
+		uint64_t   node = 0xb000072fa6ull; // my personal host for now
+
+		snprintf(
+		    addr, sizeof(addr), "zt://" NWID "/%llx:%u", node, port);
+
+		So(nng_pair_open(&s) == 0);
+		Reset({ nng_close(s); });
+
+		printf("ADDR is %s\n", addr);
+		So(nng_dialer_create(&d, s, addr) == 0);
+
+		Convey("We can lookup zerotier home option id", {
+			So(nng_optid_zt_home > 0);
+			So(nng_option_lookup(nng_opt_zt_home) ==
+			    nng_optid_zt_home);
+		});
+
+		Convey("And it can be started...", {
+			mkdir(path2, 0700);
+
+			So(nng_dialer_setopt(d, nng_optid_zt_home, path2,
+			       strlen(path2) + 1) == 0);
+
+			So(nng_dialer_start(d, 0) == NNG_ETIMEDOUT);
+		})
+	});
+
 #if 0
 	Convey("We cannot connect to wild cards", {
 		nng_socket s;

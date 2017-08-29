@@ -228,6 +228,14 @@ Given modern Internet latencies of generally less than 500 ms, resending
 up to 5 CONN requests, once every second, before giving up seems
 reasonable.
 
+A connection intiator MUST reply to an `AK` from the responder with
+yet another ACK.  The responder MUST NOT reply to an `AK` from the
+initiator except that it may reply with an ERR if the connection does
+not exist.
+
+Both parties MUST NOT send any `DATA` messages for a connection until
+they have received an ACK from the other party.
+
 If a `CONN` frame is received for a session that already exists, the
 receiver MUST reply.  Further, the source port it replies with, and
 the SP protocol IDs MUST be identical to what it first sent.  This

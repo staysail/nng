@@ -144,16 +144,18 @@ struct nni_zt_node {
 	nni_list_node zn_link;
 	int           zn_refcnt;
 	int           zn_closed;
-	nni_mtx       zn_lk;
-	nni_plat_udp *zn_udp;
+	nni_plat_udp *zn_udp4;
+	nni_plat_udp *zn_udp6;
 	nni_list      zn_eplist;
 	nni_list      zn_plist;
 	nni_idhash *  zn_eps;
 	nni_idhash *  zn_pipes;
-	nni_aio       zn_snd_aio;
-	nni_aio       zn_rcv_aio;
-	char *        zn_rcv_buf;
-	nng_sockaddr  zn_rcv_addr;
+	nni_aio       zn_rcv4_aio;
+	char *        zn_rcv4_buf;
+	nng_sockaddr  zn_rcv4_addr;
+	nni_aio       zn_rcv6_aio;
+	char *        zn_rcv6_buf;
+	nng_sockaddr  zn_rcv6_addr;
 	nni_thr       zn_bgthr;
 	nni_time      zn_bgtime;
 	nni_cv        zn_bgcv;
@@ -179,7 +181,6 @@ struct nni_zt_pipe {
 	nni_aio  zp_txaio;
 	nni_aio  zp_rxaio;
 	nni_msg *zp_rxmsg;
-	nni_mtx  zp_lk;
 };
 
 typedef struct nni_zt_creq nni_zt_creq;
@@ -210,7 +211,6 @@ struct nni_zt_ep {
 	size_t        ze_rcvmax;
 	nni_aio       ze_aio;
 	nni_list      ze_aios;
-	nni_mtx       ze_lk;
 	int           ze_maxmtu;
 	int           ze_phymtu;
 
@@ -224,6 +224,27 @@ struct nni_zt_ep {
 	int         ze_creq_tail;
 };
 
+// Locking strategy.  At present the ZeroTier core is not reentrant or fully
+// threadsafe.  (We expect this will be fixed.)  Furthermore, there are
+// some significant challenges in dealing with locks associated with the
+// callbacks, etc.  So we take a big-hammer approach, and just use a single
+// global lock for everything.  We hold this lock when calling into the
+// ZeroTier framework.  Since ZeroTier has no independent threads, that
+// means that it will always hold this lock in its core, and the lock will
+// also be held automatically in any of our callbacks.  We never hold any
+// other locks across ZeroTier core calls. We may not acquire the global
+// lock in callbacks (they will already have it held). Any other locks
+// can be acquired as long as they are not held during calls into ZeroTier.
+//
+// This will have a detrimental impact on performance, but to be completely
+// honest we don't think anyone will be using the ZeroTier transport in
+// excessively performance critical applications; scalability may become
+// a factor for large servers sitting in a ZeroTier hub situation.  (Then
+// again, since only the zerotier procesing is single threaded, it may not
+// be that much of a bottleneck -- really depends on how expensive these
+// operations are.  We can use lockstat or other lock-hotness tools to
+// check for this later.)
+
 static nni_mtx  nni_zt_lk;
 static nni_list nni_zt_nodes;
 
@@ -235,9 +256,9 @@ nni_zt_bgthr(void *arg)
 	nni_zt_node *ztn = arg;
 	nni_time     now;
 
-	nni_mtx_lock(&ztn->zn_lk);
+	nni_mtx_lock(&nni_zt_lk);
 	for (;;) {
-		now = nni_clock() / 1000; // msec
+		now = nni_clock(); // msecmsec
 
 		if (ztn->zn_closed) {
 			break;
@@ -248,37 +269,32 @@ nni_zt_bgthr(void *arg)
 			continue;
 		}
 
-		nni_mtx_unlock(&ztn->zn_lk);
+		now /= 1000; // usec -> msec
 		ZT_Node_processBackgroundTasks(ztn->zn_znode, NULL, now, &now);
-		nni_mtx_lock(&ztn->zn_lk);
 
 		ztn->zn_bgtime = now * 1000; // usec
 	}
-	nni_mtx_unlock(&ztn->zn_lk);
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static void
 nni_zt_node_resched(nni_zt_node *ztn, uint64_t msec)
 {
-	nni_mtx_lock(&ztn->zn_lk);
 	ztn->zn_bgtime = msec * 1000; // convert to usec
 	nni_cv_wake1(&ztn->zn_bgcv);
-	nni_mtx_unlock(&ztn->zn_lk);
 }
 
 static void
-nni_zt_node_rcv_cb(void *arg)
+nni_zt_node_rcv4_cb(void *arg)
 {
-	nni_zt_node *            ztn = arg;
-	nni_aio *                aio = &ztn->zn_rcv_aio;
-	struct sockaddr_storage  sa;
-	struct sockaddr_in *     sin;
-	struct sockaddr_in6 *    sin6;
-	struct nng_sockaddr_in * nsin;
-	struct nng_sockaddr_in6 *nsin6;
-	uint64_t                 now;
+	nni_zt_node *           ztn = arg;
+	nni_aio *               aio = &ztn->zn_rcv4_aio;
+	struct sockaddr_storage sa;
+	struct sockaddr_in *    sin;
+	struct nng_sockaddr_in *nsin;
+	uint64_t                now;
+	char                    abuf[64];
 
-	printf("NODE RECV CB called!\n");
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
 		// of any reason for this to legitimately fail.  Arguably
@@ -292,25 +308,16 @@ nni_zt_node_rcv_cb(void *arg)
 	}
 
 	memset(&sa, 0, sizeof(sa));
-	switch (ztn->zn_rcv_addr.s_un.s_family) {
-	case NNG_AF_INET:
-		sin                  = (void *) &sa;
-		nsin                 = &ztn->zn_rcv_addr.s_un.s_in;
-		sin->sin_family      = AF_INET;
-		sin->sin_port        = nsin->sa_port;
-		sin->sin_addr.s_addr = nsin->sa_addr;
-		break;
-	case NNG_AF_INET6:
-		sin6              = (void *) &sa;
-		nsin6             = &ztn->zn_rcv_addr.s_un.s_in6;
-		sin6->sin6_family = AF_INET6;
-		sin6->sin6_port   = nsin6->sa_port;
-		memcpy(&sin6->sin6_addr, nsin6->sa_addr, 16);
-	default:
-		NNI_ASSERT(0); // bad family!
-		goto skip;
-	}
+	sin                  = (void *) &sa;
+	nsin                 = &ztn->zn_rcv4_addr.s_un.s_in;
+	sin->sin_family      = AF_INET;
+	sin->sin_port        = nsin->sa_port;
+	sin->sin_addr.s_addr = nsin->sa_addr;
+	inet_ntop(AF_INET, &sin->sin_addr, abuf, sizeof(abuf));
+	printf("NODE RECVv4 CB called RCV FROM %s %u!\n", abuf,
+	    htons(sin->sin_port));
 
+	nni_mtx_lock(&nni_zt_lk);
 	now = nni_clock() / 1000; // msec
 
 	// We are not going to perform any validation of the data; we
@@ -318,19 +325,71 @@ nni_zt_node_rcv_cb(void *arg)
 	// XXX: CHECK THIS, if it fails then we have a fatal error with
 	// the znode, and have to shut everything down.
 	ZT_Node_processWirePacket(ztn->zn_znode, NULL, now, 0, (void *) &sa,
-	    ztn->zn_rcv_buf, aio->a_count, &now);
+	    ztn->zn_rcv4_buf, aio->a_count, &now);
 
 	// Schedule background work
 	nni_zt_node_resched(ztn, now);
 
-skip:
 	// Schedule another receive.
-	nni_mtx_lock(&ztn->zn_lk);
-	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
+	if ((!ztn->zn_closed) && (ztn->zn_udp4 != NULL)) {
 		aio->a_count = 0;
-		nni_plat_udp_recv(ztn->zn_udp, &ztn->zn_rcv_aio);
+		nni_plat_udp_recv(ztn->zn_udp4, &ztn->zn_rcv4_aio);
 	}
-	nni_mtx_unlock(&ztn->zn_lk);
+	nni_mtx_unlock(&nni_zt_lk);
+}
+
+static void
+nni_zt_node_rcv6_cb(void *arg)
+{
+	nni_zt_node *            ztn = arg;
+	nni_aio *                aio = &ztn->zn_rcv6_aio;
+	struct sockaddr_storage  sa;
+	struct sockaddr_in6 *    sin6;
+	struct nng_sockaddr_in6 *nsin6;
+	uint64_t                 now;
+	char                     abuf[64];
+
+	if (nni_aio_result(aio) != 0) {
+		// Outside of memory exhaustion, we can't really think
+		// of any reason for this to legitimately fail.  Arguably
+		// we should inject a fallback delay, but for now we just
+		// carry on.
+		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket is
+		// closed or fails in a permanent way, then we need to stop
+		// the UDP work, and forward an error to all the other
+		// endpoints and pipes!
+		return;
+	}
+
+	memset(&sa, 0, sizeof(sa));
+	sin6              = (void *) &sa;
+	nsin6             = &ztn->zn_rcv6_addr.s_un.s_in6;
+	sin6->sin6_family = AF_INET6;
+	sin6->sin6_port   = nsin6->sa_port;
+	memcpy(&sin6->sin6_addr, nsin6->sa_addr, 16);
+	inet_ntop(AF_INET6, &sin6->sin6_addr, abuf, sizeof(abuf));
+	printf("NODE RECVv6 CB called RCV FROM %s %u!\n", abuf,
+	    htons(sin6->sin6_port));
+
+	nni_mtx_lock(&nni_zt_lk);
+	now = nni_clock() / 1000; // msec
+
+	// We are not going to perform any validation of the data; we
+	// just pass this straight into the ZeroTier core.
+	// XXX: CHECK THIS, if it fails then we have a fatal error with
+	// the znode, and have to shut everything down.
+	ZT_Node_processWirePacket(ztn->zn_znode, NULL, now, 0, (void *) &sa,
+	    ztn->zn_rcv6_buf, aio->a_count, &now);
+
+	// Schedule background work
+	nni_zt_node_resched(ztn, now);
+
+	// Schedule another receive.
+	if ((!ztn->zn_closed) && (ztn->zn_udp6 != NULL)) {
+		aio->a_count = 0;
+		nni_plat_udp_recv(ztn->zn_udp6, &ztn->zn_rcv6_aio);
+	}
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static uint64_t
@@ -401,7 +460,7 @@ nni_zt_result(enum ZT_ResultCode rv)
 // ZeroTier Node API callbacks
 static int
 nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
-    uint64_t netid, void **netptr, enum ZT_VirtualNetworkConfigOperation op,
+    uint64_t nwid, void **netptr, enum ZT_VirtualNetworkConfigOperation op,
     const ZT_VirtualNetworkConfig *config)
 {
 	nni_zt_node *ztn = userptr;
@@ -409,7 +468,6 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 
 	NNI_ARG_UNUSED(node);
 	NNI_ARG_UNUSED(threadptr);
-	NNI_ARG_UNUSED(netid);
 	NNI_ARG_UNUSED(netptr);
 
 	// Maybe we don't have to create taps or anything like that.
@@ -422,22 +480,21 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 		// an API perspective the MAC could change, but that cannot
 		// really happen because the node identity and the nwid are
 		// fixed.
-		nni_mtx_lock(&ztn->zn_lk);
 		NNI_LIST_FOREACH (&ztn->zn_eplist, ep) {
+			NNI_ASSERT(nwid == config->nwid);
 			if (ep->ze_nwid != config->nwid) {
 				continue;
 			}
-			nni_mtx_lock(&ep->ze_lk);
 			ep->ze_maxmtu = config->mtu;
 			ep->ze_phymtu = config->physicalMtu;
-			printf("DEBUG: Updated MTU %d, phy MTU is %d\n",
-			    ep->ze_maxmtu, ep->ze_phymtu);
 			NNI_ASSERT(ep->ze_mac == config->mac);
-			nni_mtx_unlock(&ep->ze_lk);
 		}
-		nni_mtx_unlock(&ztn->zn_lk);
+		printf("NETWORK %llx / %llx GOING UP / UPDATE\n",
+		    ZT_Node_address(node), nwid);
 		break;
 	default:
+		printf("OTHER NETWORK CONFIG OP %x on %llx/%llx\n", op,
+		    ZT_Node_address(node), nwid);
 		break;
 	}
 	return (0);
@@ -477,6 +534,19 @@ nni_zt_send_creq(nni_zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
 	uint64_t srcmac = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
 	uint64_t dstmac = nni_zt_node_to_mac(dstnode, ep->ze_nwid);
 	uint64_t now;
+	enum ZT_ResultCode       zrv;
+	ZT_VirtualNetworkConfig *config;
+
+	printf("************ SENDING TO %llx FROM %llx on %llx/\n", dstnode,
+	    ZT_Node_address(ep->ze_ztnode->zn_znode), ep->ze_nwid);
+
+	if ((config = ZT_Node_networkConfig(
+	         ep->ze_ztnode->zn_znode, ep->ze_nwid)) != NULL) {
+		printf("GOT A CONFIG: %d [%s] status %d\n", config->mtu,
+		    config->name, config->status);
+	} else {
+		printf("MISSING CONFIG!\n");
+	}
 
 	data[NNI_ZT_OFFS_OPFLAGS] =
 	    ack ? NNI_ZT_OP_CON_ACK : NNI_ZT_OP_CON_REQ;
@@ -487,10 +557,12 @@ nni_zt_send_creq(nni_zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
 
 	printf("sending to mac %llx\n", dstmac);
 	now = nni_clock() / 1000;
-	ZT_Node_processVirtualNetworkFrame(ep->ze_ztnode->zn_znode, NULL, now,
-	    ep->ze_nwid, srcmac, dstmac, NNI_ZT_ETHER, 0, data,
+	zrv = ZT_Node_processVirtualNetworkFrame(ep->ze_ztnode->zn_znode, NULL,
+	    now, ep->ze_nwid, srcmac, dstmac, NNI_ZT_ETHER, 0, data,
 	    NNI_ZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
+	printf("SAYS %d\n", zrv);
 
+	printf("Rescheduling.... for %llx", now);
 	nni_zt_node_resched(ep->ze_ztnode, now);
 }
 
@@ -527,12 +599,9 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	// We should not need to check this, because ZT should ensure we
 	// only get messages that are actually directed to us.  We do need
 	// to accept that we may have multiple network ids.
-	nni_mtx_lock(&ztn->zn_lk);
 	if ((ztn->zn_self != dstmac) || (ztn->zn_nwid != netid)) {
-		nni_mtx_unlock(&ztn->zn_lk);
-		return;
+	n		return;
 	}
-	nni_mtx_unlock(&ztn->zn_lk);
 #endif
 
 	if (len < (NNI_ZT_OFFS_SRC_PORT + 4)) {
@@ -601,8 +670,6 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 		NNI_GET16(p + NNI_ZT_OFFS_CON_PROT, proto);
 
 		// Lets see if we have an endpoint..
-		nni_mtx_lock(&ztn->zn_lk);
-		nni_mtx_unlock(&ztn->zn_lk);
 		break;
 	// XXX: incoming connection request.
 	case NNI_ZT_OP_DIS:
@@ -623,7 +690,26 @@ static void
 nni_zt_event_cb(ZT_Node *node, void *userptr, void *threadptr,
     enum ZT_Event event, const void *payload)
 {
-	printf("GOT an EVENT %d\n", event);
+	switch (event) {
+	case ZT_EVENT_ONLINE:
+		printf("EVENT ONLINE!\n");
+		break;
+	case ZT_EVENT_UP:
+		printf("EVENT UP!\n");
+		break;
+	case ZT_EVENT_DOWN:
+		printf("EVENT DOWN!\n");
+		break;
+	case ZT_EVENT_OFFLINE:
+		printf("EVENT OFFLINE!\n");
+		break;
+	case ZT_EVENT_TRACE:
+		printf("TRACE: %s\n", (const char *) payload);
+		break;
+	default:
+		printf("OTHER EVENT %d\n", event);
+		break;
+	}
 }
 
 static const char *zt_files[] = {
@@ -658,13 +744,10 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 
 	NNI_ARG_UNUSED(objid); // only use global files
 
-	printf("STATE PUT %d len %u\n", objtype, len);
-
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
 		return;
 	}
-	printf("FNAME is %s\n", fname);
 
 	sz = sizeof(path);
 	if (snprintf(path, sz, "%s%s%s", ztn->zn_path, pathsep, fname) >= sz) {
@@ -693,7 +776,6 @@ nni_zt_state_put(ZT_Node *node, void *userptr, void *threadptr,
 		fclose(file);
 		(void) unlink(path);
 	}
-	printf("WROTE TO %s\n", path);
 	(void) fclose(file);
 }
 
@@ -711,7 +793,6 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 
 	NNI_ARG_UNUSED(objid); // we only use global files
 
-	printf("STATE GET %d (len %u)\n", objtype, len);
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
 		return (-1);
@@ -730,7 +811,7 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 	// atomic updates.  As these items (keys, etc.)  pretty much
 	// don't change, this should be fine.
 
-	if ((file = fopen(path, "wb")) == NULL) {
+	if ((file = fopen(path, "rb")) == NULL) {
 		return (-1);
 	}
 
@@ -745,6 +826,7 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 	nread = (int) fread(data, 1, len, file);
 	(void) fclose(file);
 
+	printf("*** >>> >>>> READ %d bytes FROM %s\n", nread, path);
 	return (nread);
 }
 
@@ -761,6 +843,9 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 	struct sockaddr_in * sin  = (void *) remaddr;
 	struct sockaddr_in6 *sin6 = (void *) remaddr;
 	nni_zt_node *        ztn  = userptr;
+	nni_plat_udp *       udp;
+	char                 abuf[64];
+	uint16_t             port;
 
 	NNI_ARG_UNUSED(threadptr);
 	NNI_ARG_UNUSED(socket);
@@ -773,14 +858,17 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 		addr.s_un.s_in.sa_family = NNG_AF_INET;
 		addr.s_un.s_in.sa_port   = sin->sin_port;
 		addr.s_un.s_in.sa_addr   = sin->sin_addr.s_addr;
+		udp                      = ztn->zn_udp4;
+		inet_ntop(AF_INET, &sin->sin_addr, abuf, sizeof(abuf));
+		port = htons(sin->sin_port);
 		break;
 	case AF_INET6:
-		// This probably will not work, since the underlying
-		// UDP socket is IPv4 only.  (In the future we can
-		// consider using a separate IPv6 socket.)
 		addr.s_un.s_in6.sa_family = NNG_AF_INET6;
 		addr.s_un.s_in6.sa_port   = sin6->sin6_port;
+		udp                       = ztn->zn_udp6;
 		memcpy(addr.s_un.s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
+		inet_ntop(AF_INET6, &sin6->sin6_addr, abuf, sizeof(abuf));
+		port = htons(sin6->sin6_port);
 		break;
 	default:
 		// No way to understand the address.
@@ -793,16 +881,20 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 	aio.a_iov[0].iov_buf = (void *) data;
 	aio.a_iov[0].iov_len = len;
 
-	nni_mtx_lock(&ztn->zn_lk);
-	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
+	printf("SENDING UDP FRAME TO %s %d\n", abuf, port);
+	if ((!ztn->zn_closed) && (udp != NULL)) {
 		// This should be non-blocking/best-effort, so while
-		// not great that we're holding the lock, also not
-		// tragic.
-		nni_plat_udp_send(ztn->zn_udp, &aio);
+		// not great that we're holding the lock, also not tragic.
+		nni_plat_udp_send(udp, &aio);
 	}
-	nni_mtx_unlock(&ztn->zn_lk);
 
+	// Arguably, we don't need to wait for the AIO, but we need to
+	// have the buffer arranged so that a callback can clean up.
+	nni_mtx_unlock(&nni_zt_lk);
 	nni_aio_wait(&aio);
+	nni_mtx_lock(&nni_zt_lk);
+	printf("SEND DONE\n");
+
 	if (nni_aio_result(&aio) != 0) {
 		return (-1);
 	}
@@ -825,28 +917,36 @@ static struct ZT_Node_Callbacks nni_zt_callbacks = {
 static void
 nni_zt_node_destroy(nni_zt_node *ztn)
 {
-	nni_aio_stop(&ztn->zn_snd_aio);
-	nni_aio_stop(&ztn->zn_rcv_aio);
+	nni_aio_stop(&ztn->zn_rcv4_aio);
+	nni_aio_stop(&ztn->zn_rcv6_aio);
 
-	// We will already have been marked for close, so the
-	// bgthread should already have wound down, or be doing so.
+	nni_mtx_unlock(&nni_zt_lk);
+	// Wait for background thread to exit!
 	nni_thr_fini(&ztn->zn_bgthr);
+	nni_mtx_lock(&nni_zt_lk);
 
 	if (ztn->zn_znode != NULL) {
 		ZT_Node_delete(ztn->zn_znode);
 	}
-	if (ztn->zn_udp != NULL) {
-		nni_plat_udp_close(ztn->zn_udp);
+
+	if (ztn->zn_udp4 != NULL) {
+		nni_plat_udp_close(ztn->zn_udp4);
 	}
-	if (ztn->zn_rcv_buf != NULL) {
-		nni_free(ztn->zn_rcv_buf, NNI_ZT_RCV_BUFSZ);
+	if (ztn->zn_udp6 != NULL) {
+		nni_plat_udp_close(ztn->zn_udp6);
 	}
-	nni_aio_fini(&ztn->zn_snd_aio);
-	nni_aio_fini(&ztn->zn_rcv_aio);
+
+	if (ztn->zn_rcv4_buf != NULL) {
+		nni_free(ztn->zn_rcv4_buf, NNI_ZT_RCV_BUFSZ);
+	}
+	if (ztn->zn_rcv6_buf != NULL) {
+		nni_free(ztn->zn_rcv6_buf, NNI_ZT_RCV_BUFSZ);
+	}
+	nni_aio_fini(&ztn->zn_rcv4_aio);
+	nni_aio_fini(&ztn->zn_rcv6_aio);
 	nni_idhash_fini(ztn->zn_eps);
 	nni_idhash_fini(ztn->zn_pipes);
 	nni_cv_fini(&ztn->zn_bgcv);
-	nni_mtx_fini(&ztn->zn_lk);
 	NNI_FREE_STRUCT(ztn);
 }
 
@@ -854,7 +954,8 @@ static int
 nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 {
 	nni_zt_node *      ztn;
-	nng_sockaddr       sa;
+	nng_sockaddr       sa4;
+	nng_sockaddr       sa6;
 	int                rv;
 	enum ZT_ResultCode zrv;
 
@@ -864,26 +965,30 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	// IPv6 dual stock sockets if they exist, but not all platforms
 	// support dual-stack.  Furhtermore, IPv6 is not available
 	// everywhere, and the root servers may be IPv4 only.
-	memset(&sa, 0, sizeof(sa));
-	sa.s_un.s_in.sa_family = NNG_AF_INET;
+	memset(&sa4, 0, sizeof(sa4));
+	sa4.s_un.s_in.sa_family = NNG_AF_INET;
+	memset(&sa6, 0, sizeof(sa6));
+	sa6.s_un.s_in6.sa_family = NNG_AF_INET6;
 
 	if ((ztn = NNI_ALLOC_STRUCT(ztn)) == NULL) {
 		return (NNG_ENOMEM);
 	}
 	NNI_LIST_INIT(&ztn->zn_eplist, nni_zt_ep, ze_link);
 	NNI_LIST_INIT(&ztn->zn_plist, nni_zt_pipe, zp_link);
-	nni_mtx_init(&ztn->zn_lk);
-	nni_cv_init(&ztn->zn_bgcv, &ztn->zn_lk);
-	nni_aio_init(&ztn->zn_rcv_aio, nni_zt_node_rcv_cb, ztn);
+	nni_cv_init(&ztn->zn_bgcv, &nni_zt_lk);
+	nni_aio_init(&ztn->zn_rcv4_aio, nni_zt_node_rcv4_cb, ztn);
+	nni_aio_init(&ztn->zn_rcv6_aio, nni_zt_node_rcv6_cb, ztn);
 
-	if ((ztn->zn_rcv_buf = nni_alloc(NNI_ZT_RCV_BUFSZ)) == NULL) {
+	if (((ztn->zn_rcv4_buf = nni_alloc(NNI_ZT_RCV_BUFSZ)) == NULL) ||
+	    ((ztn->zn_rcv6_buf = nni_alloc(NNI_ZT_RCV_BUFSZ)) == NULL)) {
 		nni_zt_node_destroy(ztn);
 		return (NNG_ENOMEM);
 	}
 	if (((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
 	    ((rv = nni_idhash_init(&ztn->zn_pipes)) != 0) ||
 	    ((rv = nni_thr_init(&ztn->zn_bgthr, nni_zt_bgthr, ztn)) != 0) ||
-	    ((rv = nni_plat_udp_open(&ztn->zn_udp, &sa)) != 0)) {
+	    ((rv = nni_plat_udp_open(&ztn->zn_udp4, &sa4)) != 0) ||
+	    ((rv = nni_plat_udp_open(&ztn->zn_udp6, &sa6)) != 0)) {
 		nni_zt_node_destroy(ztn);
 		return (rv);
 	}
@@ -900,12 +1005,12 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	zrv = ZT_Node_new(
 	    &ztn->zn_znode, ztn, NULL, &nni_zt_callbacks, nni_clock() / 1000);
 	if (zrv != ZT_RESULT_OK) {
-		printf("NODE NEW FAILED %d\n", zrv);
 		nni_zt_node_destroy(ztn);
 		return (nni_zt_result(zrv));
 	}
 
 	ztn->zn_self = ZT_Node_address(ztn->zn_znode);
+	printf("MY NODE ADDRESS IS %llx\n", ztn->zn_self);
 
 	nni_thr_run(&ztn->zn_bgthr);
 
@@ -913,17 +1018,19 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	nni_zt_node_resched(ztn, 1);
 
 	// Schedule receive
-	ztn->zn_rcv_aio.a_niov           = 1;
-	ztn->zn_rcv_aio.a_iov[0].iov_buf = ztn->zn_rcv_buf;
-	ztn->zn_rcv_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
-	ztn->zn_rcv_aio.a_addr           = &ztn->zn_rcv_addr;
-	ztn->zn_rcv_aio.a_count          = 0;
+	ztn->zn_rcv4_aio.a_niov           = 1;
+	ztn->zn_rcv4_aio.a_iov[0].iov_buf = ztn->zn_rcv4_buf;
+	ztn->zn_rcv4_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
+	ztn->zn_rcv4_aio.a_addr           = &ztn->zn_rcv4_addr;
+	ztn->zn_rcv4_aio.a_count          = 0;
+	ztn->zn_rcv6_aio.a_niov           = 1;
+	ztn->zn_rcv6_aio.a_iov[0].iov_buf = ztn->zn_rcv6_buf;
+	ztn->zn_rcv6_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
+	ztn->zn_rcv6_aio.a_addr           = &ztn->zn_rcv6_addr;
+	ztn->zn_rcv6_aio.a_count          = 0;
 
-	nni_mtx_lock(&ztn->zn_lk);
-	if ((!ztn->zn_closed) && (ztn->zn_udp != NULL)) {
-		nni_plat_udp_recv(ztn->zn_udp, &ztn->zn_rcv_aio);
-	}
-	nni_mtx_unlock(&ztn->zn_lk);
+	nni_plat_udp_recv(ztn->zn_udp4, &ztn->zn_rcv4_aio);
+	nni_plat_udp_recv(ztn->zn_udp6, &ztn->zn_rcv6_aio);
 
 	printf("LOOKING GOOD?\n");
 	*ztnp = ztn;
@@ -937,29 +1044,24 @@ nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 	int          rv;
 	nng_sockaddr sa;
 
-	nni_mtx_lock(&nni_zt_lk);
 	NNI_LIST_FOREACH (&nni_zt_nodes, ztn) {
 		if (strcmp(path, ztn->zn_path) == 0) {
 			ztn->zn_refcnt++;
 			*ztnp = ztn;
-			nni_mtx_unlock(&nni_zt_lk);
 			return (0);
 		}
 		if (ztn->zn_closed) {
-			nni_mtx_unlock(&nni_zt_lk);
 			return (NNG_ECLOSED);
 		}
 	}
 
 	// We didn't find a node, so make one.  And try to initialize it.
 	if ((rv = nni_zt_node_create(&ztn, path)) != 0) {
-		nni_mtx_unlock(&nni_zt_lk);
 		return (rv);
 	}
 	ztn->zn_refcnt++;
 	*ztnp = ztn;
 	nni_list_append(&nni_zt_nodes, ztn);
-	nni_mtx_unlock(&nni_zt_lk);
 
 	return (0);
 }
@@ -967,16 +1069,13 @@ nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 static void
 nni_zt_node_rele(nni_zt_node *ztn)
 {
-	nni_mtx_lock(&nni_zt_lk);
 	ztn->zn_refcnt--;
 	if (ztn->zn_refcnt != 0) {
-		nni_mtx_unlock(&nni_zt_lk);
 		return;
 	}
 	ztn->zn_closed = 1;
 	nni_cv_wake(&ztn->zn_bgcv);
 	nni_list_remove(&nni_zt_nodes, ztn);
-	nni_mtx_unlock(&nni_zt_lk);
 
 	printf("DESTROYING NODE %p\n", ztn);
 	nni_zt_node_destroy(ztn);
@@ -1020,6 +1119,8 @@ static void
 nni_zt_tran_fini(void)
 {
 	nng_optid_zt_home = -1;
+	nng_optid_zt_nwid = -1;
+
 	NNI_ASSERT(nni_list_empty(&nni_zt_nodes));
 	nni_mtx_fini(&nni_zt_lk);
 }
@@ -1082,7 +1183,6 @@ static void
 nni_zt_ep_fini(void *arg)
 {
 	nni_zt_ep *ep = arg;
-	nni_mtx_fini(&ep->ze_lk);
 	NNI_FREE_STRUCT(ep);
 }
 
@@ -1196,7 +1296,6 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	ep->ze_node = node;
 	ep->ze_nwid = nwid;
 
-	nni_mtx_init(&ep->ze_lk);
 	return (0);
 }
 
@@ -1208,28 +1307,26 @@ nni_zt_ep_close(void *arg)
 	nni_aio *    aio;
 
 	// Cancel any outstanding user operation(s)
-	nni_mtx_lock(&ep->ze_lk);
+	nni_mtx_lock(&nni_zt_lk);
 	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
 		nni_aio_list_remove(aio);
 		nni_aio_finish_error(aio, NNG_ECLOSED);
 	}
-	nni_mtx_unlock(&ep->ze_lk);
 
 	// Endpoint framework guarantees to only call us once, and to not
 	// call other things while we are closed.
-	nni_mtx_lock(&nni_zt_lk);
 	ztn = ep->ze_ztnode;
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
 		nni_idhash_remove(ztn->zn_eps, ep->ze_lport);
 	}
-	nni_mtx_unlock(&nni_zt_lk);
 
 	if (ztn != NULL) {
 		nni_zt_node_rele(ztn);
 		ep->ze_ztnode = NULL;
 	}
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static int
@@ -1250,10 +1347,11 @@ nni_zt_ep_join(nni_zt_ep *ep)
 		NNI_ASSERT(config->nwid == ep->ze_nwid);
 		ep->ze_maxmtu = config->mtu;
 		ep->ze_phymtu = config->physicalMtu;
-		printf("JOIN MTU is %d, phy MTU is %d\n", ep->ze_maxmtu,
-		    ep->ze_phymtu);
 		NNI_ASSERT(ep->ze_mac == config->mac);
 		ZT_Node_freeQueryResult(ztn->zn_znode, config);
+		printf("GOT A NETWORK CONFIG MTU %d\n", ep->ze_maxmtu);
+	} else {
+		printf("NETWORK CONFIG IS NULL!!!!\n");
 	}
 	return (0);
 }
@@ -1265,11 +1363,12 @@ nni_zt_ep_bind(void *arg)
 	nni_zt_ep *  ep = arg;
 	nni_zt_node *ztn;
 
+	nni_mtx_lock(&nni_zt_lk);
 	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
+		nni_mtx_unlock(&nni_zt_lk);
 		return (rv);
 	}
 
-	nni_mtx_lock(&nni_zt_lk);
 	if (ep->ze_lport == 0) {
 		uint64_t port;
 		// ask for an ephemeral port
@@ -1284,8 +1383,8 @@ nni_zt_ep_bind(void *arg)
 		// Make sure our port is not already in use.
 		if (nni_idhash_find(
 		        ztn->zn_eps, ep->ze_lport, (void **) &srch) == 0) {
-			nni_mtx_unlock(&nni_zt_lk);
 			nni_zt_node_rele(ztn);
+			nni_mtx_unlock(&nni_zt_lk);
 			return (NNG_EADDRINUSE);
 		}
 
@@ -1293,17 +1392,17 @@ nni_zt_ep_bind(void *arg)
 		rv = nni_idhash_insert(ztn->zn_eps, ep->ze_lport, ep);
 	}
 	if (rv != 0) {
-		nni_mtx_unlock(&nni_zt_lk);
 		nni_zt_node_rele(ztn);
+		nni_mtx_unlock(&nni_zt_lk);
 		return (rv);
 	}
 	nni_list_append(&ztn->zn_eplist, ep);
 	ep->ze_self   = ztn->zn_self;
 	ep->ze_mac    = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
 	ep->ze_ztnode = ztn;
-	nni_mtx_unlock(&nni_zt_lk);
 
 	(void) nni_zt_ep_join(ep);
+	nni_mtx_unlock(&nni_zt_lk);
 
 	return (0);
 }
@@ -1313,12 +1412,12 @@ nni_zt_ep_cancel(nni_aio *aio, int rv)
 {
 	nni_zt_ep *ep = aio->a_prov_data;
 
-	nni_mtx_lock(&ep->ze_lk);
+	nni_mtx_lock(&nni_zt_lk);
 	if (nni_aio_list_active(aio)) {
 		nni_aio_list_remove(aio);
 		nni_aio_finish_error(aio, rv);
 	}
-	nni_mtx_unlock(&ep->ze_lk);
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static void
@@ -1353,15 +1452,12 @@ nni_zt_ep_doaccept(nni_zt_ep *ep)
 
 		// We remove this AIO.  This keeps it from being canceled.
 		nni_aio_list_remove(aio);
-		nni_mtx_unlock(&ep->ze_lk);
 
 		// Now we need to create a pipe, send the notice to
 		// the user, and finish the request.  For now we are pretty
 		// lame and just return NNG_EINTERNAL.
 
 		nni_aio_finish_error(aio, NNG_EINTERNAL);
-
-		nni_mtx_lock(&ep->ze_lk);
 	}
 }
 
@@ -1370,12 +1466,12 @@ nni_zt_ep_accept(void *arg, nni_aio *aio)
 {
 	nni_zt_ep *ep = arg;
 
-	nni_mtx_lock(&ep->ze_lk);
+	nni_mtx_lock(&nni_zt_lk);
 	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
 		nni_aio_list_append(&ep->ze_aios, aio);
 		nni_zt_ep_doaccept(ep);
 	}
-	nni_mtx_unlock(&ep->ze_lk);
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static void
@@ -1386,13 +1482,14 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 	nni_zt_node *ztn;
 	int          rv;
 
+	nni_mtx_lock(&nni_zt_lk);
 	if ((rv = nni_zt_node_find(&ztn, ep->ze_home)) != 0) {
+		nni_mtx_unlock(&nni_zt_lk);
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
 
 	// Allocate an ephemeral port.  We will keep this one forever.
-	nni_mtx_lock(&nni_zt_lk);
 	if (ep->ze_lport == 0) {
 		// ask for an ephemeral port
 		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
@@ -1403,9 +1500,7 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 		}
 		nni_list_append(&ztn->zn_eplist, ep);
 	}
-	nni_mtx_unlock(&nni_zt_lk);
 
-	nni_mtx_lock(&ep->ze_lk);
 	// Force a maximum timeout for connect.
 	// XXX: This should probably be tunable.
 	if (aio->a_expire > (nni_clock() + NNI_ZT_CONN_MAXTIME)) {
@@ -1413,16 +1508,22 @@ nni_zt_ep_connect(void *arg, nni_aio *aio)
 	}
 	if (nni_aio_start(aio, nni_zt_ep_cancel, ep) == 0) {
 		nni_aio_list_append(&ep->ze_aios, aio);
+
+		ep->ze_ztnode = ztn;
+		ep->ze_self   = ztn->zn_self;
+		ep->ze_mac    = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+
+		(void) nni_zt_ep_join(ep);
+		nni_mtx_unlock(&nni_zt_lk);
+
+		printf("SLEEPING FOR 20 s\n");
+		nni_usleep(20000000); // maybe?
+		printf("WE'RE BAAAACK....!!!!\n");
+		nni_mtx_lock(&nni_zt_lk);
+		nni_zt_send_creq(ep, ep->ze_node, ep->ze_rport, 0);
+		// XXX: send out the connect message.
 	}
-	ep->ze_ztnode = ztn;
-	ep->ze_self   = ztn->zn_self;
-	ep->ze_mac    = nni_zt_node_to_mac(ep->ze_self, ep->ze_nwid);
-	nni_mtx_unlock(&ep->ze_lk);
-
-	(void) nni_zt_ep_join(ep);
-
-	nni_zt_send_creq(ep, ep->ze_node, ep->ze_rport, 0);
-	// XXX: send out the connect message.
+	nni_mtx_unlock(&nni_zt_lk);
 }
 
 static int
@@ -1433,23 +1534,19 @@ nni_zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 	int        rv = NNG_ENOTSUP;
 
 	if (opt == nng_optid_recvmaxsz) {
-		nni_mtx_lock(&ep->ze_lk);
+		nni_mtx_lock(&nni_zt_lk);
 		rv = nni_setopt_size(
 		    &ep->ze_rcvmax, data, size, 0, 0xffffffffu);
-		nni_mtx_unlock(&ep->ze_lk);
+		nni_mtx_unlock(&nni_zt_lk);
 	} else if (opt == nng_optid_zt_home) {
 		// XXX: check to make sure not started...
-		for (i = 0; i < size; i++) {
-			if (((const char *) data)[i] == '\0') {
-				break;
-			}
-		}
+		i = nni_strnlen((const char *) data, size);
 		if ((i >= size) || (i >= NNG_MAXADDRLEN)) {
 			return (NNG_EINVAL);
 		}
-		nni_mtx_lock(&ep->ze_lk);
+		nni_mtx_lock(&nni_zt_lk);
 		(void) snprintf(ep->ze_home, sizeof(ep->ze_home), "%s", data);
-		nni_mtx_unlock(&ep->ze_lk);
+		nni_mtx_unlock(&nni_zt_lk);
 		rv = 0;
 	}
 	return (rv);
@@ -1462,17 +1559,17 @@ nni_zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 	int        rv = NNG_ENOTSUP;
 
 	if (opt == nng_optid_recvmaxsz) {
-		nni_mtx_lock(&ep->ze_lk);
+		nni_mtx_lock(&nni_zt_lk);
 		rv = nni_getopt_size(&ep->ze_rcvmax, data, sizep);
-		nni_mtx_unlock(&ep->ze_lk);
+		nni_mtx_unlock(&nni_zt_lk);
 	} else if (opt == nng_optid_zt_home) {
-		nni_mtx_lock(&ep->ze_lk);
+		nni_mtx_lock(&nni_zt_lk);
 		rv = nni_getopt_str(ep->ze_home, data, sizep);
-		nni_mtx_unlock(&ep->ze_lk);
+		nni_mtx_unlock(&nni_zt_lk);
 	} else if (opt == nng_optid_zt_nwid) {
-		nni_mtx_lock(&ep->ze_lk);
+		nni_mtx_lock(&nni_zt_lk);
 		rv = nni_getopt_u64(ep->ze_nwid, data, sizep);
-		nni_mtx_unlock(&ep->ze_lk);
+		nni_mtx_unlock(&nni_zt_lk);
 	}
 	return (rv);
 }

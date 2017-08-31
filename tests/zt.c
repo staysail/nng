@@ -36,13 +36,13 @@ mkdir(const char *path, int mode)
 TestMain("ZeroTier Transport", {
 
 	// trantest_test_all("tcp://127.0.0.1:%u");
-	char     path1[NNG_MAXADDRLEN];
-	char     path2[NNG_MAXADDRLEN];
+	char     path1[NNG_MAXADDRLEN] = "/tmp/zt_server";
+	char     path2[NNG_MAXADDRLEN] = "/tmp/zt_client";
 	unsigned port;
 
-	trantest_next_address(path1, "/tmp/zt_serv_%u");
-	trantest_prev_address(path2, "/tmp/zt_clnt_%u");
-	port = trantest_port - 1;
+	//	trantest_next_address(path1, "/tmp/zt_serv_1");
+	//	trantest_prev_address(path2, "/tmp/zt_clnt_1");
+	port = 5555;
 
 	atexit(nng_fini);
 
@@ -88,7 +88,8 @@ TestMain("ZeroTier Transport", {
 		nng_socket s;
 		char       addr[NNG_MAXADDRLEN];
 		int        rv;
-		uint64_t   node = 0xb000072fa6ull; // my personal host for now
+		// uint64_t   node = 0xb000072fa6ull; // my personal host
+		uint64_t node = 0x2d2f619cccull; // my personal host
 
 		snprintf(
 		    addr, sizeof(addr), "zt://" NWID "/%llx:%u", node, port);
@@ -112,7 +113,10 @@ TestMain("ZeroTier Transport", {
 			       strlen(path2) + 1) == 0);
 
 			So(nng_dialer_start(d, 0) == NNG_ETIMEDOUT);
-		})
+
+			// Sleeping a bit
+			nng_usleep(10000000);
+		});
 	});
 
 #if 0

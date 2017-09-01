@@ -106,7 +106,7 @@ add_nng_test(errors 2)
 add_nng_test(pair1 5)
 
 if (NNG_HAVE_ZEROTIER)
-    add_nng_test(zt 5)
+    add_nng_test(zt 60)
 endif()
 
 # compatbility tests

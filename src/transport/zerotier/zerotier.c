@@ -107,6 +107,11 @@ typedef struct nni_zt_node nni_zt_node;
 #define NNI_ZT_EPHEMERAL (1U << 23)
 #define NNI_ZT_MAX_PORT ((1U << 24) - 1)
 
+// We queue UDP for transmit asynchronously.  In order to avoid consuming
+// all RAM, we limit the UDP queue len to this many frames.   (Note that
+// this queue should pretty well always be empty.)
+#define NNI_ZT_UDP_MAXQ 16
+
 // Connection timeout maximum.  Basically we expect that a remote host
 // will respond within this many usecs to a connection request.  Note
 // that on Linux TCP connection timeouts are about 20s, and on othe systems
@@ -159,6 +164,7 @@ struct nni_zt_node {
 	nni_thr       zn_bgthr;
 	nni_time      zn_bgtime;
 	nni_cv        zn_bgcv;
+	nni_cv        zn_snd6_cv;
 };
 
 struct nni_zt_pipe {
@@ -297,13 +303,13 @@ nni_zt_node_rcv4_cb(void *arg)
 
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
-		// of any reason for this to legitimately fail.  Arguably
-		// we should inject a fallback delay, but for now we just
-		// carry on.
-		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket is
-		// closed or fails in a permanent way, then we need to stop
-		// the UDP work, and forward an error to all the other
-		// endpoints and pipes!
+		// of any reason for this to legitimately fail.
+		// Arguably we should inject a fallback delay, but for
+		// now we just carry on.
+		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket
+		// is closed or fails in a permanent way, then we need
+		// to stop the UDP work, and forward an error to all
+		// the other endpoints and pipes!
 		return;
 	}
 
@@ -351,13 +357,13 @@ nni_zt_node_rcv6_cb(void *arg)
 
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
-		// of any reason for this to legitimately fail.  Arguably
-		// we should inject a fallback delay, but for now we just
-		// carry on.
-		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket is
-		// closed or fails in a permanent way, then we need to stop
-		// the UDP work, and forward an error to all the other
-		// endpoints and pipes!
+		// of any reason for this to legitimately fail.
+		// Arguably we should inject a fallback delay, but for
+		// now we just carry on.
+		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket
+		// is closed or fails in a permanent way, then we need
+		// to stop the UDP work, and forward an error to all
+		// the other endpoints and pipes!
 		return;
 	}
 
@@ -423,7 +429,8 @@ nni_zt_node_to_mac(uint64_t node, uint64_t nwid)
 	}
 	mac <<= 40;
 	mac |= node;
-	// The rest of the network ID is XOR'd in, in reverse byte order.
+	// The rest of the network ID is XOR'd in, in reverse byte
+	// order.
 	mac ^= ((nwid >> 8) & 0xff) << 32;
 	mac ^= ((nwid >> 16) & 0xff) << 24;
 	mac ^= ((nwid >> 24) & 0xff) << 16;
@@ -477,9 +484,9 @@ nni_zt_virtual_network_config(ZT_Node *node, void *userptr, void *threadptr,
 	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_CONFIG_UPDATE:
 
 		// We only really care about changes to the MTU.  From
-		// an API perspective the MAC could change, but that cannot
-		// really happen because the node identity and the nwid are
-		// fixed.
+		// an API perspective the MAC could change, but that
+		// cannot really happen because the node identity and
+		// the nwid are fixed.
 		NNI_LIST_FOREACH (&ztn->zn_eplist, ep) {
 			NNI_ASSERT(nwid == config->nwid);
 			if (ep->ze_nwid != config->nwid) {
@@ -590,7 +597,8 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 
 	printf("VIRTUAL NET FRAME RECVD\n");
 	if (ethertype != NNI_ZT_ETHER) {
-		// This is a weird frame we can't use, just throw it away.
+		// This is a weird frame we can't use, just throw it
+		// away.
 		printf("DEBUG: WRONG ETHERTYPE %x\n", ethertype);
 		return;
 	}
@@ -647,13 +655,13 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	//    we wouldn't need the CON_ACK.
 	// 3. No endpoint.  Send an error.
 	case NNI_ZT_OP_PNG_REQ:
-	// Look for matching pipe.  If none found, send an error, otherwise
-	// send an ack.  Update timestamps.
+	// Look for matching pipe.  If none found, send an error,
+	// otherwise send an ack.  Update timestamps.
 	case NNI_ZT_OP_PNG_ACK:
 	// Update timestamps, no further action.
 	case NNI_ZT_OP_DIS:
-	// Look for matching pipe.  If found, disconnect.  (Maybe disconnect
-	// pending connreq too?)
+	// Look for matching pipe.  If found, disconnect.  (Maybe
+	// disconnect pending connreq too?)
 	case NNI_ZT_OP_DAT:
 	case NNI_ZT_OP_DAT | NNI_ZT_FLAG_MF:
 	case NNI_ZT_OP_ERR:
@@ -678,8 +686,8 @@ nni_zt_virtual_network_frame(ZT_Node *node, void *userptr, void *threadptr,
 	// XXX: look for a matching convo, and fail it, or if we have
 	// a connect request pending, fail that
 	case NNI_ZT_OP_PNG:
-	// XXX: look for a matching convo, and send a ping ack (updating
-	// things).
+	// XXX: look for a matching convo, and send a ping ack
+	// (updating things).
 	default:
 		printf("DEBUG: BAD ZT_OP %x", opflags);
 		return;
@@ -830,9 +838,29 @@ nni_zt_state_get(ZT_Node *node, void *userptr, void *threadptr,
 	return (nread);
 }
 
-// This function is called when ZeroTier desires to send a physical frame.
-// The data is a UDP payload, the rest of the payload should be set over
-// vanilla UDP.
+typedef struct nni_zt_send_hdr {
+	nni_sockaddr sa;
+	size_t       len;
+} nni_zt_send_hdr;
+
+static void
+nni_zt_wire_packet_send_cb(void *arg)
+{
+	// We don't actually care much about the results, we just need
+	// to release the resources.
+	nni_aio *        aio = arg;
+	nni_zt_send_hdr *hdr;
+
+	hdr = nni_aio_get_data(aio);
+	nni_free(hdr, hdr->len + sizeof(*hdr));
+	printf("SEND DONE %d %s!\n", nni_aio_result(aio),
+	    nng_strerror(nni_aio_result(aio)));
+	nni_aio_fini_cb(aio);
+}
+
+// This function is called when ZeroTier desires to send a physical
+// frame. The data is a UDP payload, the rest of the payload should be
+// set over vanilla UDP.
 static int
 nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
     int64_t socket, const struct sockaddr_storage *remaddr, const void *data,
@@ -846,6 +874,8 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 	nni_plat_udp *       udp;
 	char                 abuf[64];
 	uint16_t             port;
+	char *               buf;
+	nni_zt_send_hdr *    hdr;
 
 	NNI_ARG_UNUSED(threadptr);
 	NNI_ARG_UNUSED(socket);
@@ -875,30 +905,33 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 		return (-1);
 	}
 
-	nni_aio_init(&aio, NULL, NULL);
-	aio->a_addr           = &addr;
+	if (nni_aio_init(&aio, nni_zt_wire_packet_send_cb, NULL) != 0) {
+		// Out of memory
+		return (-1);
+	}
+	if ((buf = nni_alloc(sizeof(*hdr) + len)) == NULL) {
+		nni_aio_fini(aio);
+		return (-1);
+	}
+
+	hdr = (void *) buf;
+	buf += sizeof(*hdr);
+
+	memcpy(buf, data, len);
+	nni_aio_set_data(aio, hdr);
+	hdr->sa  = addr;
+	hdr->len = len;
+
+	aio->a_addr           = &hdr->sa;
 	aio->a_niov           = 1;
-	aio->a_iov[0].iov_buf = (void *) data;
+	aio->a_iov[0].iov_buf = buf;
 	aio->a_iov[0].iov_len = len;
 
 	printf("SENDING UDP FRAME TO %s %d\n", abuf, port);
-	if ((!ztn->zn_closed) && (udp != NULL)) {
-		// This should be non-blocking/best-effort, so while
-		// not great that we're holding the lock, also not tragic.
-		nni_plat_udp_send(udp, aio);
-	}
-
-	// Arguably, we don't need to wait for the AIO, but we need to
-	// have the buffer arranged so that a callback can clean up.
-	nni_mtx_unlock(&nni_zt_lk);
-	nni_aio_wait(aio);
-	nni_mtx_lock(&nni_zt_lk);
-	printf("SEND DONE\n");
-
-	if (nni_aio_result(aio) != 0) {
-		return (-1);
-	}
-	nni_aio_fini(aio);
+	// This should be non-blocking/best-effort, so while
+	// not great that we're holding the lock, also not tragic.
+	nni_aio_set_synch(aio);
+	nni_plat_udp_send(udp, aio);
 
 	return (0);
 }
@@ -918,10 +951,10 @@ static struct ZT_Node_Callbacks nni_zt_callbacks = {
 static void
 nni_zt_node_destroy(nni_zt_node *ztn)
 {
+	nni_mtx_unlock(&nni_zt_lk);
 	nni_aio_stop(ztn->zn_rcv4_aio);
 	nni_aio_stop(ztn->zn_rcv6_aio);
 
-	nni_mtx_unlock(&nni_zt_lk);
 	// Wait for background thread to exit!
 	nni_thr_fini(&ztn->zn_bgthr);
 	nni_mtx_lock(&nni_zt_lk);
@@ -961,11 +994,11 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	enum ZT_ResultCode zrv;
 
 	// We want to bind to any address we can (for now).  Note that
-	// at the moment we only support IPv4.  Its unclear how we are meant
-	// to handle underlying IPv6 in ZeroTier.  Probably we can use
-	// IPv6 dual stock sockets if they exist, but not all platforms
-	// support dual-stack.  Furhtermore, IPv6 is not available
-	// everywhere, and the root servers may be IPv4 only.
+	// at the moment we only support IPv4.  Its unclear how we are
+	// meant to handle underlying IPv6 in ZeroTier.  Probably we
+	// can use IPv6 dual stock sockets if they exist, but not all
+	// platforms support dual-stack.  Furhtermore, IPv6 is not
+	// available everywhere, and the root servers may be IPv4 only.
 	memset(&sa4, 0, sizeof(sa4));
 	sa4.s_un.s_in.sa_family = NNG_AF_INET;
 	memset(&sa6, 0, sizeof(sa6));
@@ -994,10 +1027,11 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 		return (rv);
 	}
 
-	// Setup for dynamic ephemeral port allocations.  We set the range
-	// to allow for ephemeral ports, but not higher than the max port,
-	// and starting with an initial random value.  Note that this should
-	// give us about 8 million possible ephemeral ports.
+	// Setup for dynamic ephemeral port allocations.  We set the
+	// range to allow for ephemeral ports, but not higher than the
+	// max port, and starting with an initial random value.  Note
+	// that this should give us about 8 million possible ephemeral
+	// ports.
 	nni_idhash_set_limits(ztn->zn_eps, NNI_ZT_EPHEMERAL, NNI_ZT_MAX_PORT,
 	    (nni_random() % (NNI_ZT_MAX_PORT - NNI_ZT_EPHEMERAL)) +
 	        NNI_ZT_EPHEMERAL);
@@ -1056,7 +1090,8 @@ nni_zt_node_find(nni_zt_node **ztnp, const char *path)
 		}
 	}
 
-	// We didn't find a node, so make one.  And try to initialize it.
+	// We didn't find a node, so make one.  And try to initialize
+	// it.
 	if ((rv = nni_zt_node_create(&ztn, path)) != 0) {
 		return (rv);
 	}
@@ -1244,8 +1279,8 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	// URL parsing...
 	// URL is form zt://<nwid>[/<remoteaddr>]:<port>
 	// The <remoteaddr> part is required for remote dialers, but
-	// is not used at all for listeners.  (We have no notion of binding
-	// to different node addresses.)
+	// is not used at all for listeners.  (We have no notion of
+	// binding to different node addresses.)
 	ep->ze_mode   = mode;
 	ep->ze_maxmtu = ZT_MAX_MTU;
 	ep->ze_phymtu = ZT_MIN_MTU;
@@ -1278,8 +1313,8 @@ nni_zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		break;
 	case NNI_EP_MODE_LISTEN:
 		// Listen mode is just zt://<nwid>:<port>.  The port
-		// may be zero in this case, to indicate that the server
-		// should allocate an ephemeral port.
+		// may be zero in this case, to indicate that the
+		// server should allocate an ephemeral port.
 		if ((nni_zt_parsehex(&u, &nwid) != 0) || (*u++ != ':') ||
 		    (nni_zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
 		    (port > NNI_ZT_MAX_PORT)) {
@@ -1314,8 +1349,8 @@ nni_zt_ep_close(void *arg)
 		nni_aio_finish_error(aio, NNG_ECLOSED);
 	}
 
-	// Endpoint framework guarantees to only call us once, and to not
-	// call other things while we are closed.
+	// Endpoint framework guarantees to only call us once, and to
+	// not call other things while we are closed.
 	ztn = ep->ze_ztnode;
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
@@ -1451,12 +1486,13 @@ nni_zt_ep_doaccept(nni_zt_ep *ep)
 		// Advance the tail.
 		ep->ze_creq_tail++;
 
-		// We remove this AIO.  This keeps it from being canceled.
+		// We remove this AIO.  This keeps it from being
+		// canceled.
 		nni_aio_list_remove(aio);
 
 		// Now we need to create a pipe, send the notice to
-		// the user, and finish the request.  For now we are pretty
-		// lame and just return NNG_EINTERNAL.
+		// the user, and finish the request.  For now we are
+		// pretty lame and just return NNG_EINTERNAL.
 
 		nni_aio_finish_error(aio, NNG_EINTERNAL);
 	}
@@ -1596,8 +1632,8 @@ static nni_tran_ep nni_zt_ep_ops = {
 	.ep_getopt  = NULL,
 };
 
-// This is the ZeroTier transport linkage, and should be the only global
-// symbol in this entire file.
+// This is the ZeroTier transport linkage, and should be the only
+// global symbol in this entire file.
 static struct nni_tran nni_zt_tran = {
 	.tran_version = NNI_TRANSPORT_VERSION,
 	.tran_scheme  = "zt",

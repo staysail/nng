@@ -150,10 +150,10 @@ struct nni_zt_node {
 	nni_list      zn_plist;
 	nni_idhash *  zn_eps;
 	nni_idhash *  zn_pipes;
-	nni_aio       zn_rcv4_aio;
+	nni_aio *     zn_rcv4_aio;
 	char *        zn_rcv4_buf;
 	nng_sockaddr  zn_rcv4_addr;
-	nni_aio       zn_rcv6_aio;
+	nni_aio *     zn_rcv6_aio;
 	char *        zn_rcv6_buf;
 	nng_sockaddr  zn_rcv6_addr;
 	nni_thr       zn_bgthr;
@@ -178,8 +178,8 @@ struct nni_zt_pipe {
 	nni_sockaddr zp_remaddr;
 	nni_sockaddr zp_locaddr;
 
-	nni_aio  zp_txaio;
-	nni_aio  zp_rxaio;
+	nni_aio *zp_txaio;
+	nni_aio *zp_rxaio;
 	nni_msg *zp_rxmsg;
 };
 
@@ -288,7 +288,7 @@ static void
 nni_zt_node_rcv4_cb(void *arg)
 {
 	nni_zt_node *           ztn = arg;
-	nni_aio *               aio = &ztn->zn_rcv4_aio;
+	nni_aio *               aio = ztn->zn_rcv4_aio;
 	struct sockaddr_storage sa;
 	struct sockaddr_in *    sin;
 	struct nng_sockaddr_in *nsin;
@@ -333,7 +333,7 @@ nni_zt_node_rcv4_cb(void *arg)
 	// Schedule another receive.
 	if ((!ztn->zn_closed) && (ztn->zn_udp4 != NULL)) {
 		aio->a_count = 0;
-		nni_plat_udp_recv(ztn->zn_udp4, &ztn->zn_rcv4_aio);
+		nni_plat_udp_recv(ztn->zn_udp4, aio);
 	}
 	nni_mtx_unlock(&nni_zt_lk);
 }
@@ -342,7 +342,7 @@ static void
 nni_zt_node_rcv6_cb(void *arg)
 {
 	nni_zt_node *            ztn = arg;
-	nni_aio *                aio = &ztn->zn_rcv6_aio;
+	nni_aio *                aio = ztn->zn_rcv6_aio;
 	struct sockaddr_storage  sa;
 	struct sockaddr_in6 *    sin6;
 	struct nng_sockaddr_in6 *nsin6;
@@ -387,7 +387,7 @@ nni_zt_node_rcv6_cb(void *arg)
 	// Schedule another receive.
 	if ((!ztn->zn_closed) && (ztn->zn_udp6 != NULL)) {
 		aio->a_count = 0;
-		nni_plat_udp_recv(ztn->zn_udp6, &ztn->zn_rcv6_aio);
+		nni_plat_udp_recv(ztn->zn_udp6, aio);
 	}
 	nni_mtx_unlock(&nni_zt_lk);
 }
@@ -838,7 +838,7 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
     int64_t socket, const struct sockaddr_storage *remaddr, const void *data,
     unsigned int len, unsigned int ttl)
 {
-	nni_aio              aio;
+	nni_aio *            aio;
 	nni_sockaddr         addr;
 	struct sockaddr_in * sin  = (void *) remaddr;
 	struct sockaddr_in6 *sin6 = (void *) remaddr;
@@ -876,28 +876,29 @@ nni_zt_wire_packet_send(ZT_Node *node, void *userptr, void *threadptr,
 	}
 
 	nni_aio_init(&aio, NULL, NULL);
-	aio.a_addr           = &addr;
-	aio.a_niov           = 1;
-	aio.a_iov[0].iov_buf = (void *) data;
-	aio.a_iov[0].iov_len = len;
+	aio->a_addr           = &addr;
+	aio->a_niov           = 1;
+	aio->a_iov[0].iov_buf = (void *) data;
+	aio->a_iov[0].iov_len = len;
 
 	printf("SENDING UDP FRAME TO %s %d\n", abuf, port);
 	if ((!ztn->zn_closed) && (udp != NULL)) {
 		// This should be non-blocking/best-effort, so while
 		// not great that we're holding the lock, also not tragic.
-		nni_plat_udp_send(udp, &aio);
+		nni_plat_udp_send(udp, aio);
 	}
 
 	// Arguably, we don't need to wait for the AIO, but we need to
 	// have the buffer arranged so that a callback can clean up.
 	nni_mtx_unlock(&nni_zt_lk);
-	nni_aio_wait(&aio);
+	nni_aio_wait(aio);
 	nni_mtx_lock(&nni_zt_lk);
 	printf("SEND DONE\n");
 
-	if (nni_aio_result(&aio) != 0) {
+	if (nni_aio_result(aio) != 0) {
 		return (-1);
 	}
+	nni_aio_fini(aio);
 
 	return (0);
 }
@@ -917,8 +918,8 @@ static struct ZT_Node_Callbacks nni_zt_callbacks = {
 static void
 nni_zt_node_destroy(nni_zt_node *ztn)
 {
-	nni_aio_stop(&ztn->zn_rcv4_aio);
-	nni_aio_stop(&ztn->zn_rcv6_aio);
+	nni_aio_stop(ztn->zn_rcv4_aio);
+	nni_aio_stop(ztn->zn_rcv6_aio);
 
 	nni_mtx_unlock(&nni_zt_lk);
 	// Wait for background thread to exit!
@@ -942,8 +943,8 @@ nni_zt_node_destroy(nni_zt_node *ztn)
 	if (ztn->zn_rcv6_buf != NULL) {
 		nni_free(ztn->zn_rcv6_buf, NNI_ZT_RCV_BUFSZ);
 	}
-	nni_aio_fini(&ztn->zn_rcv4_aio);
-	nni_aio_fini(&ztn->zn_rcv6_aio);
+	nni_aio_fini(ztn->zn_rcv4_aio);
+	nni_aio_fini(ztn->zn_rcv6_aio);
 	nni_idhash_fini(ztn->zn_eps);
 	nni_idhash_fini(ztn->zn_pipes);
 	nni_cv_fini(&ztn->zn_bgcv);
@@ -1018,19 +1019,19 @@ nni_zt_node_create(nni_zt_node **ztnp, const char *path)
 	nni_zt_node_resched(ztn, 1);
 
 	// Schedule receive
-	ztn->zn_rcv4_aio.a_niov           = 1;
-	ztn->zn_rcv4_aio.a_iov[0].iov_buf = ztn->zn_rcv4_buf;
-	ztn->zn_rcv4_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
-	ztn->zn_rcv4_aio.a_addr           = &ztn->zn_rcv4_addr;
-	ztn->zn_rcv4_aio.a_count          = 0;
-	ztn->zn_rcv6_aio.a_niov           = 1;
-	ztn->zn_rcv6_aio.a_iov[0].iov_buf = ztn->zn_rcv6_buf;
-	ztn->zn_rcv6_aio.a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
-	ztn->zn_rcv6_aio.a_addr           = &ztn->zn_rcv6_addr;
-	ztn->zn_rcv6_aio.a_count          = 0;
+	ztn->zn_rcv4_aio->a_niov           = 1;
+	ztn->zn_rcv4_aio->a_iov[0].iov_buf = ztn->zn_rcv4_buf;
+	ztn->zn_rcv4_aio->a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
+	ztn->zn_rcv4_aio->a_addr           = &ztn->zn_rcv4_addr;
+	ztn->zn_rcv4_aio->a_count          = 0;
+	ztn->zn_rcv6_aio->a_niov           = 1;
+	ztn->zn_rcv6_aio->a_iov[0].iov_buf = ztn->zn_rcv6_buf;
+	ztn->zn_rcv6_aio->a_iov[0].iov_len = NNI_ZT_RCV_BUFSZ;
+	ztn->zn_rcv6_aio->a_addr           = &ztn->zn_rcv6_addr;
+	ztn->zn_rcv6_aio->a_count          = 0;
 
-	nni_plat_udp_recv(ztn->zn_udp4, &ztn->zn_rcv4_aio);
-	nni_plat_udp_recv(ztn->zn_udp6, &ztn->zn_rcv6_aio);
+	nni_plat_udp_recv(ztn->zn_udp4, ztn->zn_rcv4_aio);
+	nni_plat_udp_recv(ztn->zn_udp6, ztn->zn_rcv6_aio);
 
 	printf("LOOKING GOOD?\n");
 	*ztnp = ztn;

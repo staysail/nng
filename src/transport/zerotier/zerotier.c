@@ -158,6 +158,7 @@ struct zt_node {
 	nni_plat_udp *zn_udp6;
 	nni_list      zn_eplist;
 	nni_list      zn_plist;
+	nni_idhash *  zn_ports;
 	nni_idhash *  zn_eps;
 	nni_idhash *  zn_pipes;
 	nni_aio *     zn_rcv4_aio;
@@ -182,8 +183,9 @@ struct zt_pipe {
 	nni_aio *     zp_user_rxaio;
 	uint32_t      zp_src_port;
 	uint32_t      zp_dst_port;
-	uint64_t      zp_self_conv;
-	uint64_t      zp_peer_conv;
+	uint64_t      zp_dst_node;
+	uint64_t      zp_src_node;
+	zt_node *     zp_ztn;
 
 	// XXX: fraglist
 	nni_sockaddr zp_remaddr;
@@ -191,6 +193,7 @@ struct zt_pipe {
 
 	nni_aio *zp_txaio;
 	nni_aio *zp_rxaio;
+	nni_aio *zp_negaio;
 	nni_msg *zp_rxmsg;
 };
 
@@ -209,7 +212,7 @@ struct zt_ep {
 	nni_list_node ze_link;
 	char          ze_url[NNG_MAXADDRLEN];
 	char          ze_home[NNG_MAXADDRLEN]; // should be enough
-	zt_node *     ze_ztnode;
+	zt_node *     ze_ztn;
 	uint64_t      ze_nwid;
 	uint64_t      ze_self;
 	uint64_t      ze_mac;  // our own mac address
@@ -551,7 +554,7 @@ zt_send_creq(zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
 	uint64_t srcmac = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
 	uint64_t dstmac = zt_node_to_mac(dstnode, ep->ze_nwid);
 	uint64_t now;
-	ZT_Node *znode = ep->ze_ztnode->zn_znode;
+	ZT_Node *znode = ep->ze_ztn->zn_znode;
 	ZT_VirtualNetworkConfig *vcfg;
 	enum ZT_ResultCode       zrv;
 
@@ -600,7 +603,7 @@ zt_send_creq(zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
 	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
 	printf("SAYS %d %s\n", zrv, nng_strerror(zt_result(zrv)));
 
-	zt_node_resched(ep->ze_ztnode, now);
+	zt_node_resched(ep->ze_ztn, now);
 }
 
 // This function is called when a frame arrives on the
@@ -1047,7 +1050,8 @@ zt_node_create(zt_node **ztnp, const char *path)
 		zt_node_destroy(ztn);
 		return (NNG_ENOMEM);
 	}
-	if (((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
+	if (((rv = nni_idhash_init(&ztn->zn_ports)) != 0) ||
+	    ((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
 	    ((rv = nni_idhash_init(&ztn->zn_pipes)) != 0) ||
 	    ((rv = nni_thr_init(&ztn->zn_bgthr, zt_bgthr, ztn)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp4, &sa4)) != 0) ||
@@ -1061,7 +1065,7 @@ zt_node_create(zt_node **ztnp, const char *path)
 	// higher than the max port, and starting with an
 	// initial random value.  Note that this should give us
 	// about 8 million possible ephemeral ports.
-	nni_idhash_set_limits(ztn->zn_eps, NZT_EPHEMERAL, NZT_MAX_PORT,
+	nni_idhash_set_limits(ztn->zn_ports, NZT_EPHEMERAL, NZT_MAX_PORT,
 	    (nni_random() % (NZT_MAX_PORT - NZT_EPHEMERAL)) + NZT_EPHEMERAL);
 
 	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
@@ -1201,15 +1205,67 @@ zt_pipe_close(void *arg)
 static void
 zt_pipe_fini(void *arg)
 {
-	// This tosses the connection details and all state.
+	zt_pipe *p = arg;
+	uint64_t port;
+	zt_node *ztn = p->zp_ztn;
+
+	nni_aio_stop(p->zp_rxaio);
+	nni_aio_stop(p->zp_txaio);
+	nni_aio_stop(p->zp_negaio);
+
+	port = p->zp_src_port;
+	if (port != 0) {
+		// This tosses the connection details and all state.
+		nni_mtx_lock(&zt_lk);
+		nni_idhash_remove(ztn->zn_pipes, port);
+		nni_idhash_remove(ztn->zn_ports, port);
+		nni_mtx_unlock(&zt_lk);
+	}
+	NNI_FREE_STRUCT(p);
+}
+
+static void
+zt_pipe_send_cb(void *arg)
+{
+}
+
+static void
+zt_pipe_recv_cb(void *arg)
+{
+}
+
+static void
+zt_pipe_nego_cb(void *arg)
+{
 }
 
 static int
-zt_pipe_init(zt_pipe **pipep, zt_ep *ep, void *tpp)
+zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t rnode, uint32_t rport)
 {
-	// TCP version of this takes a platform specific
-	// structure and creates a pipe.  We should rethink
-	// this for ZT.
+	zt_pipe *p;
+	uint64_t port = 0;
+	int      rv;
+	zt_node *ztn = ep->ze_ztn;
+
+	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	p->zp_ztn      = ztn;
+	p->zp_dst_port = rport;
+	p->zp_dst_node = rnode;
+	p->zp_proto    = ep->ze_proto;
+	p->zp_src_node = ep->ze_self;
+
+	if (((rv = nni_aio_init(&p->zp_txaio, zt_pipe_send_cb, p)) != 0) ||
+	    ((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
+	    ((rv = nni_aio_init(&p->zp_negaio, zt_pipe_nego_cb, p)) != 0) ||
+	    ((rv = nni_idhash_alloc(ztn->zn_ports, &port, p)) != 0) ||
+	    ((rv = nni_idhash_insert(ztn->zn_pipes, port, p)) != 0)) {
+		p->zp_src_port = (uint32_t) port;
+		zt_pipe_fini(p);
+	}
+	p->zp_src_port = (uint32_t) port;
+
 	return (NNG_ENOTSUP);
 }
 
@@ -1385,16 +1441,17 @@ zt_ep_close(void *arg)
 
 	// Endpoint framework guarantees to only call us once,
 	// and to not call other things while we are closed.
-	ztn = ep->ze_ztnode;
+	ztn = ep->ze_ztn;
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
 		nni_idhash_remove(ztn->zn_eps, ep->ze_lport);
+		nni_idhash_remove(ztn->zn_ports, ep->ze_lport);
 	}
 
 	if (ztn != NULL) {
 		zt_node_rele(ztn);
-		ep->ze_ztnode = NULL;
+		ep->ze_ztn = NULL;
 	}
 	nni_mtx_unlock(&zt_lk);
 }
@@ -1403,7 +1460,7 @@ static int
 zt_ep_join(zt_ep *ep)
 {
 	enum ZT_ResultCode       zrv;
-	zt_node *                ztn = ep->ze_ztnode;
+	zt_node *                ztn = ep->ze_ztn;
 	ZT_VirtualNetworkConfig *vcfg;
 
 	if ((zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL)) !=
@@ -1429,6 +1486,7 @@ zt_ep_bind(void *arg)
 	int      rv;
 	zt_ep *  ep = arg;
 	zt_node *ztn;
+	uint64_t port;
 
 	nni_mtx_lock(&zt_lk);
 	if ((rv = zt_node_find(&ztn, ep->ze_home)) != 0) {
@@ -1437,26 +1495,37 @@ zt_ep_bind(void *arg)
 	}
 
 	if (ep->ze_lport == 0) {
-		uint64_t port;
 		// ask for an ephemeral port
-		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
-		if (rv == 0) {
-			NNI_ASSERT(port < NZT_MAX_PORT);
-			NNI_ASSERT(port & NZT_EPHEMERAL);
-			ep->ze_lport = (uint32_t) port;
+		if (((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) ||
+		    ((rv = nni_idhash_insert(ztn->zn_eps, port, ep)) != 0)) {
+			nni_idhash_remove(ztn->zn_ports, port);
+			nni_idhash_remove(ztn->zn_eps, port);
+			zt_node_rele(ztn);
+			nni_mtx_unlock(&zt_lk);
+			return (rv);
 		}
+		NNI_ASSERT(port < NZT_MAX_PORT);
+		NNI_ASSERT(port & NZT_EPHEMERAL);
+		ep->ze_lport = (uint32_t) port;
 	} else {
-		zt_ep *srch;
+		void *conflict;
+		port = ep->ze_lport;
 		// Make sure our port is not already in use.
-		if (nni_idhash_find(
-		        ztn->zn_eps, ep->ze_lport, (void **) &srch) == 0) {
+		if (nni_idhash_find(ztn->zn_ports, port, &conflict) == 0) {
 			zt_node_rele(ztn);
 			nni_mtx_unlock(&zt_lk);
 			return (NNG_EADDRINUSE);
 		}
 
 		// we have a specific port to use
-		rv = nni_idhash_insert(ztn->zn_eps, ep->ze_lport, ep);
+		if (((rv = nni_idhash_insert(ztn->zn_ports, port, ep)) != 0) ||
+		    ((rv = nni_idhash_insert(ztn->zn_eps, port, ep)) != 0)) {
+			nni_idhash_remove(ztn->zn_ports, port);
+			nni_idhash_remove(ztn->zn_eps, port);
+			zt_node_rele(ztn);
+			nni_mtx_unlock(&zt_lk);
+			return (rv);
+		}
 	}
 	if (rv != 0) {
 		zt_node_rele(ztn);
@@ -1464,9 +1533,9 @@ zt_ep_bind(void *arg)
 		return (rv);
 	}
 	nni_list_append(&ztn->zn_eplist, ep);
-	ep->ze_self   = ztn->zn_self;
-	ep->ze_mac    = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
-	ep->ze_ztnode = ztn;
+	ep->ze_self = ztn->zn_self;
+	ep->ze_mac  = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+	ep->ze_ztn  = ztn;
 
 	(void) zt_ep_join(ep);
 	nni_mtx_unlock(&zt_lk);
@@ -1547,6 +1616,14 @@ zt_ep_accept(void *arg, nni_aio *aio)
 }
 
 static void
+zt_ep_creq_cancel(nni_aio *aio, int rv)
+{
+	// We don't have much to do here.
+	zt_ep *ep = aio->a_prov_data;
+	nni_aio_finish_error(aio, rv);
+}
+
+static void
 zt_ep_creq_cb(void *arg)
 {
 	zt_ep *  ep  = arg;
@@ -1572,10 +1649,11 @@ zt_ep_creq_cb(void *arg)
 			return;
 		}
 
-		// Well we can still maybe retry?
+		// Timed out, but our master timer has not expired, so
+		// send another.
 		zt_send_creq(ep, ep->ze_node, ep->ze_rport, ep->ze_creq_acked);
 		nni_aio_set_timeout(aio, nni_clock() + NZT_CONN_INTERVAL);
-		nni_aio_start(aio, zt_ep_cancel, ep);
+		nni_aio_start(aio, zt_ep_creq_cancel, ep);
 	}
 }
 
@@ -1599,11 +1677,14 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		return;
 	}
 
+	// PLAN B:  Create a Pipe.  Put that into neg mode.
+	// Pipe will send details.....
+
 	// Allocate an ephemeral port.  We will keep this one
 	// forever.
 	if (ep->ze_lport == 0) {
 		// ask for an ephemeral port
-		rv = nni_idhash_alloc(ztn->zn_eps, &port, ep);
+		rv = nni_idhash_alloc(ztn->zn_ports, &port, ep);
 		if (rv == 0) {
 			NNI_ASSERT(port <= NZT_MAX_PORT);
 			NNI_ASSERT(port & NZT_EPHEMERAL);
@@ -1620,9 +1701,9 @@ zt_ep_connect(void *arg, nni_aio *aio)
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
 		nni_aio_list_append(&ep->ze_aios, aio);
 
-		ep->ze_ztnode = ztn;
-		ep->ze_self   = ztn->zn_self;
-		ep->ze_mac    = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+		ep->ze_ztn  = ztn;
+		ep->ze_self = ztn->zn_self;
+		ep->ze_mac  = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
 
 		(void) zt_ep_join(ep);
 		// We send out the first connect message.  This may

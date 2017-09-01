@@ -638,7 +638,7 @@ struct nng_sockaddr_in {
 struct nng_sockaddr_zt {
 	uint64_t sa_nwid;
 	uint64_t sa_nodeid;
-	uint16_t sa_port;
+	uint32_t sa_port;
 };
 
 typedef struct nng_sockaddr_in nng_sockaddr_in;

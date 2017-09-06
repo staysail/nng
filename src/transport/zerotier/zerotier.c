@@ -130,7 +130,7 @@ typedef struct zt_node zt_node;
 // is separated from the previous by five seconds.  We need long timeouts
 // because it can take time for ZT to stabilize.  This gives us 60 seconds
 // to get a good connection.
-#define NZT_CONN_ATTEMPTS 12
+#define NZT_CONN_ATTEMPTS (12 * 5)
 #define NZT_CONN_INTERVAL (5000000)
 
 // It can take a while to establish the network connection.  This is because
@@ -159,7 +159,6 @@ struct zt_node {
 	ZT_Node *     zn_znode;
 	uint64_t      zn_self;
 	nni_list_node zn_link;
-	int           zn_refcnt;
 	int           zn_closed;
 	nni_plat_udp *zn_udp4;
 	nni_plat_udp *zn_udp6;
@@ -233,7 +232,6 @@ struct zt_ep {
 	nni_aio *     ze_aio;
 	nni_aio *     ze_creq_aio;
 	int           ze_creq_try;
-	nni_aio *     ze_cack_aio;
 	nni_list      ze_aios;
 	int           ze_maxmtu;
 	int           ze_phymtu;
@@ -272,7 +270,6 @@ struct zt_ep {
 static nni_mtx  zt_lk;
 static nni_list zt_nodes;
 
-static void zt_node_rele(zt_node *);
 static void zt_ep_send_creq(zt_ep *);
 static void zt_ep_creq_cb(void *);
 
@@ -518,6 +515,7 @@ zt_virtual_network_config(ZT_Node *node, void *userptr, void *thr,
 
 			if ((ep->ze_mode == NNI_EP_MODE_DIAL) &&
 			    (nni_list_first(&ep->ze_aios) != NULL)) {
+				printf("SENDING A CREQ because we are up!\n");
 				zt_ep_send_creq(ep);
 			}
 			// if (ep->ze_mode == NNI_EP
@@ -592,15 +590,14 @@ zt_send_cack(zt_ep *ep, uint64_t rnode, uint32_t rport)
 static void
 zt_ep_send_creq(zt_ep *ep)
 {
-	uint8_t            data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
-	uint64_t           srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
-	uint64_t           dstmac = zt_node_to_mac(ep->ze_rnode, ep->ze_nwid);
-	uint64_t           now    = nni_clock();
-	ZT_Node *          znode  = ep->ze_ztn->zn_znode;
-	enum ZT_ResultCode zrv;
+	uint8_t  data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
+	uint64_t srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+	uint64_t dstmac = zt_node_to_mac(ep->ze_rnode, ep->ze_nwid);
+	uint64_t now    = nni_clock();
+	ZT_Node *znode  = ep->ze_ztn->zn_znode;
 
-	printf("************ SENDING CREQ TO %llx FROM %llx on %llx/\n",
-	    ep->ze_rnode, ZT_Node_address(znode), ep->ze_nwid);
+	printf("==> SENDING CREQ TO %llx (%llx) FROM %llx (%llx) on %llx\n",
+	    ep->ze_rnode, dstmac, ep->ze_lnode, srcmac, ep->ze_nwid);
 
 	data[NZT_OFFS_OPFLAGS] = NZT_OP_CON_REQ;
 	data[NZT_OFFS_VERSION] = NZT_VERSION;
@@ -608,7 +605,7 @@ zt_ep_send_creq(zt_ep *ep)
 	NNI_PUT32(data + NZT_OFFS_SRC_PORT, ep->ze_lport);
 	NNI_PUT16(data + NZT_OFFS_CON_PROT, ep->ze_proto);
 
-	zrv = ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
+	(void) ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
 	    ep->ze_nwid, srcmac, dstmac, NZT_ETHER, 0, data,
 	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
 
@@ -991,13 +988,11 @@ static struct ZT_Node_Callbacks zt_callbacks = {
 static void
 zt_node_destroy(zt_node *ztn)
 {
-	nni_mtx_unlock(&zt_lk);
 	nni_aio_stop(ztn->zn_rcv4_aio);
 	nni_aio_stop(ztn->zn_rcv6_aio);
 
 	// Wait for background thread to exit!
 	nni_thr_fini(&ztn->zn_bgthr);
-	nni_mtx_lock(&zt_lk);
 
 	if (ztn->zn_znode != NULL) {
 		ZT_Node_delete(ztn->zn_znode);
@@ -1122,7 +1117,6 @@ zt_node_find(zt_node **ztnp, const char *path)
 
 	NNI_LIST_FOREACH (&zt_nodes, ztn) {
 		if (strcmp(path, ztn->zn_path) == 0) {
-			ztn->zn_refcnt++;
 			*ztnp = ztn;
 			return (0);
 		}
@@ -1136,26 +1130,10 @@ zt_node_find(zt_node **ztnp, const char *path)
 	if ((rv = zt_node_create(&ztn, path)) != 0) {
 		return (rv);
 	}
-	ztn->zn_refcnt++;
 	*ztnp = ztn;
 	nni_list_append(&zt_nodes, ztn);
 
 	return (0);
-}
-
-static void
-zt_node_rele(zt_node *ztn)
-{
-	ztn->zn_refcnt--;
-	if (ztn->zn_refcnt != 0) {
-		return;
-	}
-	ztn->zn_closed = 1;
-	nni_cv_wake(&ztn->zn_bgcv);
-	nni_list_remove(&zt_nodes, ztn);
-
-	printf("DESTROYING NODE %p\n", ztn);
-	zt_node_destroy(ztn);
 }
 
 static int
@@ -1198,6 +1176,16 @@ zt_tran_fini(void)
 {
 	nng_optid_zt_home = -1;
 	nng_optid_zt_nwid = -1;
+	zt_node *ztn;
+
+	nni_mtx_lock(&zt_lk);
+	while ((ztn = nni_list_first(&zt_nodes)) != 0) {
+		nni_list_remove(&zt_nodes, ztn);
+		nni_mtx_unlock(&zt_lk);
+
+		zt_node_destroy(ztn);
+	}
+	nni_mtx_unlock(&zt_lk);
 
 	NNI_ASSERT(nni_list_empty(&zt_nodes));
 	nni_mtx_fini(&zt_lk);
@@ -1316,9 +1304,7 @@ zt_ep_fini(void *arg)
 {
 	zt_ep *ep = arg;
 	nni_aio_stop(ep->ze_creq_aio);
-	nni_aio_stop(ep->ze_cack_aio);
 	nni_aio_fini(ep->ze_creq_aio);
-	nni_aio_fini(ep->ze_cack_aio);
 	NNI_FREE_STRUCT(ep);
 }
 
@@ -1454,7 +1440,6 @@ zt_ep_close(void *arg)
 	nni_aio *aio;
 
 	nni_aio_cancel(ep->ze_creq_aio, NNG_ECLOSED);
-	//	nni_aio_cancel(ep->ze_cack_aio, NNG_ECLOSED);
 
 	// Cancel any outstanding user operation(s) - they should have
 	// been aborted by the above cancellation, but we need to be sure,
@@ -1476,10 +1461,6 @@ zt_ep_close(void *arg)
 		nni_idhash_remove(ztn->zn_ports, ep->ze_lport);
 	}
 
-	if (ztn != NULL) {
-		zt_node_rele(ztn);
-		ep->ze_ztn = NULL;
-	}
 	nni_mtx_unlock(&zt_lk);
 }
 
@@ -1492,7 +1473,6 @@ zt_ep_join(zt_ep *ep)
 
 	zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
 	if ((zrv != ZT_RESULT_OK) && (zrv != ZT_RESULT_OK_IGNORED)) {
-		zt_node_rele(ztn);
 		return;
 	}
 
@@ -1519,13 +1499,14 @@ zt_ep_bind(void *arg)
 		return (rv);
 	}
 
+	ep->ze_ztn = ztn;
+
 	if (ep->ze_lport == 0) {
 		// ask for an ephemeral port
 		if (((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) ||
 		    ((rv = nni_idhash_insert(ztn->zn_eps, port, ep)) != 0)) {
 			nni_idhash_remove(ztn->zn_ports, port);
 			nni_idhash_remove(ztn->zn_eps, port);
-			zt_node_rele(ztn);
 			nni_mtx_unlock(&zt_lk);
 			return (rv);
 		}
@@ -1537,7 +1518,6 @@ zt_ep_bind(void *arg)
 		port = ep->ze_lport;
 		// Make sure our port is not already in use.
 		if (nni_idhash_find(ztn->zn_ports, port, &conflict) == 0) {
-			zt_node_rele(ztn);
 			nni_mtx_unlock(&zt_lk);
 			return (NNG_EADDRINUSE);
 		}
@@ -1547,13 +1527,11 @@ zt_ep_bind(void *arg)
 		    ((rv = nni_idhash_insert(ztn->zn_eps, port, ep)) != 0)) {
 			nni_idhash_remove(ztn->zn_ports, port);
 			nni_idhash_remove(ztn->zn_eps, port);
-			zt_node_rele(ztn);
 			nni_mtx_unlock(&zt_lk);
 			return (rv);
 		}
 	}
 	if (rv != 0) {
-		zt_node_rele(ztn);
 		nni_mtx_unlock(&zt_lk);
 		return (rv);
 	}
@@ -1643,7 +1621,8 @@ zt_ep_accept(void *arg, nni_aio *aio)
 static void
 zt_ep_creq_cancel(nni_aio *aio, int rv)
 {
-	// We don't have much to do here.
+	// We don't have much to do here.  The AIO will have been
+	// canceled as a result of the "parent" AIO canceling.
 	zt_ep *ep = aio->a_prov_data;
 	nni_aio_finish_error(aio, rv);
 }
@@ -1724,16 +1703,6 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
-
-#if 0
-	// Create a pipe.  We won't hand this back to the user yet,
-	// but instead hold it until we get the ack back from the
-	// server. This lets us detect a CONN_REFUSED condition.
-	if ((rv = zt_pipe_init(&p, ep, ep->ze_rnode, ep->ze_rport)) != 0) {
-		zt_node_rele(ztn);
-		nni_mtx_unlock(&zt_lk);
-	}
-#endif
 
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
 		nni_time now;

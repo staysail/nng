@@ -1109,16 +1109,16 @@ zt_node_create(zt_node **ztnp, const char *path)
 }
 
 static int
-zt_node_find(zt_node **ztnp, const char *path)
+zt_node_find(zt_ep *ep)
 {
-	zt_node *    ztn;
-	int          rv;
-	nng_sockaddr sa;
+	zt_node *                ztn;
+	int                      rv;
+	nng_sockaddr             sa;
+	ZT_VirtualNetworkConfig *cf;
 
 	NNI_LIST_FOREACH (&zt_nodes, ztn) {
-		if (strcmp(path, ztn->zn_path) == 0) {
-			*ztnp = ztn;
-			return (0);
+		if (strcmp(ep->ze_home, ztn->zn_path) == 0) {
+			goto done;
 		}
 		if (ztn->zn_closed) {
 			return (NNG_ECLOSED);
@@ -1127,11 +1127,27 @@ zt_node_find(zt_node **ztnp, const char *path)
 
 	// We didn't find a node, so make one.  And try to
 	// initialize it.
-	if ((rv = zt_node_create(&ztn, path)) != 0) {
+	if ((rv = zt_node_create(&ztn, ep->ze_home)) != 0) {
 		return (rv);
 	}
-	*ztnp = ztn;
+
+done:
+
+	ep->ze_ztn   = ztn;
+	ep->ze_lnode = ztn->zn_self;
+	ep->ze_mac   = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+	nni_list_append(&ztn->zn_eplist, ep);
 	nni_list_append(&zt_nodes, ztn);
+
+	(void) ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
+
+	if ((cf = ZT_Node_networkConfig(ztn->zn_znode, ep->ze_nwid)) != NULL) {
+		NNI_ASSERT(cf->nwid == ep->ze_nwid);
+		ep->ze_maxmtu = cf->mtu;
+		ep->ze_phymtu = cf->physicalMtu;
+		NNI_ASSERT(ep->ze_mac == cf->mac);
+		ZT_Node_freeQueryResult(ztn->zn_znode, cf);
+	}
 
 	return (0);
 }
@@ -1464,42 +1480,21 @@ zt_ep_close(void *arg)
 	nni_mtx_unlock(&zt_lk);
 }
 
-static void
-zt_ep_join(zt_ep *ep)
-{
-	enum ZT_ResultCode       zrv;
-	zt_node *                ztn = ep->ze_ztn;
-	ZT_VirtualNetworkConfig *cf;
-
-	zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
-	if ((zrv != ZT_RESULT_OK) && (zrv != ZT_RESULT_OK_IGNORED)) {
-		return;
-	}
-
-	if ((cf = ZT_Node_networkConfig(ztn->zn_znode, ep->ze_nwid)) != NULL) {
-		NNI_ASSERT(cf->nwid == ep->ze_nwid);
-		ep->ze_maxmtu = cf->mtu;
-		ep->ze_phymtu = cf->physicalMtu;
-		NNI_ASSERT(ep->ze_mac == cf->mac);
-		ZT_Node_freeQueryResult(ztn->zn_znode, cf);
-	}
-}
-
 static int
 zt_ep_bind(void *arg)
 {
 	int      rv;
 	zt_ep *  ep = arg;
-	zt_node *ztn;
 	uint64_t port;
+	zt_node *ztn;
 
 	nni_mtx_lock(&zt_lk);
-	if ((rv = zt_node_find(&ztn, ep->ze_home)) != 0) {
+	if ((rv = zt_node_find(ep)) != 0) {
 		nni_mtx_unlock(&zt_lk);
 		return (rv);
 	}
 
-	ep->ze_ztn = ztn;
+	ztn = ep->ze_ztn;
 
 	if (ep->ze_lport == 0) {
 		// ask for an ephemeral port
@@ -1535,12 +1530,7 @@ zt_ep_bind(void *arg)
 		nni_mtx_unlock(&zt_lk);
 		return (rv);
 	}
-	nni_list_append(&ztn->zn_eplist, ep);
-	ep->ze_lnode = ztn->zn_self;
-	ep->ze_mac   = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
-	ep->ze_ztn   = ztn;
 
-	zt_ep_join(ep);
 	nni_mtx_unlock(&zt_lk);
 
 	return (0);
@@ -1693,29 +1683,23 @@ zt_ep_connect(void *arg, nni_aio *aio)
 {
 	zt_ep *  ep = arg;
 	uint64_t port;
-	zt_node *ztn;
 	zt_pipe *p;
 	int      rv;
 
 	nni_mtx_lock(&zt_lk);
-	if ((rv = zt_node_find(&ztn, ep->ze_home)) != 0) {
+	if ((rv = zt_node_find(ep)) != 0) {
 		nni_mtx_unlock(&zt_lk);
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
 
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
-		nni_time now;
+		nni_time now = nni_clock();
 
 		nni_aio_list_append(&ep->ze_aios, aio);
 
-		now             = nni_clock();
-		ep->ze_ztn      = ztn;
-		ep->ze_lnode    = ztn->zn_self;
-		ep->ze_mac      = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
 		ep->ze_creq_try = 1;
 
-		zt_ep_join(ep);
 		nni_aio_set_timeout(ep->ze_creq_aio, now + NZT_CONN_INTERVAL);
 		// This can't fail -- the only way the ze_creq_aio gets
 		// terminated would have required us to have also canceled

@@ -119,18 +119,25 @@ typedef struct zt_node zt_node;
 
 // Connection timeout maximum.  Basically we expect that a remote host
 // will respond within this many usecs to a connection request.  Note
-// that on Linux TCP connection timeouts are about 20s, and on othe systems
+// that on Linux TCP connection timeouts are about 20s, and on other systems
 // they are about 72s.  This seems rather ridiculously long.  Modern
 // Internet latencies generally never exceed 500ms, and processes should
-// not be MIA for more than a few hundred ms as well.
+// not be MIA for more than a few hundred ms as well.  Having said that, it
+// can take a number of seconds for ZT topology to settle out.
 
 // Connection retry and timeouts.  We send a connection attempt up to
-// five times, before giving up and reporting to the user.  Each attempt
+// 12 times, before giving up and reporting to the user.  Each attempt
 // is separated from the previous by five seconds.  We need long timeouts
-// because it can take time for ZT to stabilize.
-#define NZT_CONN_ATTEMPTS (5)
+// because it can take time for ZT to stabilize.  This gives us 60 seconds
+// to get a good connection.
+#define NZT_CONN_ATTEMPTS 12
 #define NZT_CONN_INTERVAL (5000000)
-#define NZT_CONN_MAXTIME ((NZT_CONN_ATTEMPTS + 1) * NZT_CONN_INTERVAL)
+
+// It can take a while to establish the network connection.  This is because
+// ZT is doing crypto operations, and discovery of network topology (both
+// physical and virtual).  We assume this should complete within half a
+// minute or so though.
+#define NZT_JOIN_MAXTIME (30000000)
 
 // In theory UDP can send/recv 655507, but ZeroTier won't do more
 // than the ZT_MAX_MTU for it's virtual networks  So we need to add some
@@ -214,16 +221,19 @@ struct zt_ep {
 	char          ze_home[NNG_MAXADDRLEN]; // should be enough
 	zt_node *     ze_ztn;
 	uint64_t      ze_nwid;
-	uint64_t      ze_self;
-	uint64_t      ze_mac;  // our own mac address
-	uint64_t      ze_node; // remote node address normally
+	uint64_t      ze_mac; // our own mac address
 	int           ze_mode;
 	nni_sockaddr  ze_addr;
+	uint64_t      ze_rnode; // remote node address
+	uint64_t      ze_lnode; // local node address
 	uint32_t      ze_rport;
 	uint32_t      ze_lport;
 	uint16_t      ze_proto;
 	size_t        ze_rcvmax;
 	nni_aio *     ze_aio;
+	nni_aio *     ze_creq_aio;
+	int           ze_creq_try;
+	nni_aio *     ze_cack_aio;
 	nni_list      ze_aios;
 	int           ze_maxmtu;
 	int           ze_phymtu;
@@ -236,11 +246,6 @@ struct zt_ep {
 	zt_creq ze_creqs[NZT_LISTENQ];
 	int     ze_creq_head;
 	int     ze_creq_tail;
-
-	// Dialer side stuff.
-	int      ze_creq_acked;
-	nni_time ze_creq_start;
-	nni_time ze_creq_last;
 };
 
 // Locking strategy.  At present the ZeroTier core is not reentrant or fully
@@ -268,6 +273,8 @@ static nni_mtx  zt_lk;
 static nni_list zt_nodes;
 
 static void zt_node_rele(zt_node *);
+static void zt_ep_send_creq(zt_ep *);
+static void zt_ep_creq_cb(void *);
 
 static void
 zt_bgthr(void *arg)
@@ -509,11 +516,20 @@ zt_virtual_network_config(ZT_Node *node, void *userptr, void *thr,
 			ep->ze_phymtu = config->physicalMtu;
 			NNI_ASSERT(ep->ze_mac == config->mac);
 
+			if ((ep->ze_mode == NNI_EP_MODE_DIAL) &&
+			    (nni_list_first(&ep->ze_aios) != NULL)) {
+				zt_ep_send_creq(ep);
+			}
+			// if (ep->ze_mode == NNI_EP
+			//	zt_send_
+			//	nni_aio_finish(ep->ze_join_aio, 0);
+			// }
 			// XXX: schedule creqs if needed!
 		}
 		break;
 	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_DESTROY:
 	case ZT_VIRTUAL_NETWORK_CONFIG_OPERATION_DOWN:
+	// XXX: tear down endpoints?
 	default:
 		break;
 	}
@@ -548,60 +564,53 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t dstnode, uint32_t srcport,
 }
 
 static void
-zt_send_creq(zt_ep *ep, uint64_t dstnode, uint32_t dstport, int ack)
+zt_send_cack(zt_ep *ep, uint64_t rnode, uint32_t rport)
 {
-	uint8_t  data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
-	uint64_t srcmac = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
-	uint64_t dstmac = zt_node_to_mac(dstnode, ep->ze_nwid);
-	uint64_t now;
-	ZT_Node *znode = ep->ze_ztn->zn_znode;
-	ZT_VirtualNetworkConfig *vcfg;
-	enum ZT_ResultCode       zrv;
+	uint8_t            data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
+	uint64_t           srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+	uint64_t           dstmac = zt_node_to_mac(rnode, ep->ze_nwid);
+	ZT_Node *          znode  = ep->ze_ztn->zn_znode;
+	uint64_t           now    = nni_clock();
+	enum ZT_ResultCode zrv;
 
-	now              = nni_clock();
-	ep->ze_creq_last = now;
-	if (ep->ze_creq_start == NNI_TIME_ZERO) {
-		ep->ze_creq_start = now;
-	}
-
-	// Let's check the status first.
-	if ((vcfg = ZT_Node_networkConfig(znode, ep->ze_nwid)) == NULL) {
-		printf(">>>>>>>>>>>>>>>>  NOT JOINED!?\n");
-		return;
-	}
-	switch (vcfg->status) {
-	case ZT_NETWORK_STATUS_OK:
-		break;
-	case ZT_NETWORK_STATUS_REQUESTING_CONFIGURATION:
-		// Still requesting a configuration.  Just drop this for now.
-		// XXX: Schedule a resend.
-		printf("NETWORK NOT READY YET!!\n");
-		return;
-	case ZT_NETWORK_STATUS_ACCESS_DENIED:
-	// EPERM condition. NNG_EPERM
-	case ZT_NETWORK_STATUS_CLIENT_TOO_OLD:
-	// EINVAL condition. NNG_EINVAL
-	case ZT_NETWORK_STATUS_NOT_FOUND:
-	// No such network! NNG_UNREACHABLE
-	case ZT_NETWORK_STATUS_PORT_ERROR:
-		// Some kind of internal error!  NNG_ETRANERR ?
-		// We pick up vcfg->portError;
-		break;
-	}
-
-	printf("************ SENDING TO %llx FROM %llx on %llx/\n", dstnode,
+	printf("************ SENDING CACK TO %llx FROM %llx on %llx/\n", rnode,
 	    ZT_Node_address(znode), ep->ze_nwid);
 
-	data[NZT_OFFS_OPFLAGS] = ack ? NZT_OP_CON_ACK : NZT_OP_CON_REQ;
+	data[NZT_OFFS_OPFLAGS] = NZT_OP_CON_ACK;
 	data[NZT_OFFS_VERSION] = NZT_VERSION;
-	NNI_PUT32(data + NZT_OFFS_DST_PORT, dstport);
+	NNI_PUT32(data + NZT_OFFS_DST_PORT, rport);
 	NNI_PUT32(data + NZT_OFFS_SRC_PORT, ep->ze_lport);
 	NNI_PUT16(data + NZT_OFFS_CON_PROT, ep->ze_proto);
 
 	zrv = ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
 	    ep->ze_nwid, srcmac, dstmac, NZT_ETHER, 0, data,
 	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
-	printf("SAYS %d %s\n", zrv, nng_strerror(zt_result(zrv)));
+
+	zt_node_resched(ep->ze_ztn, now);
+}
+
+static void
+zt_ep_send_creq(zt_ep *ep)
+{
+	uint8_t            data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
+	uint64_t           srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+	uint64_t           dstmac = zt_node_to_mac(ep->ze_rnode, ep->ze_nwid);
+	uint64_t           now    = nni_clock();
+	ZT_Node *          znode  = ep->ze_ztn->zn_znode;
+	enum ZT_ResultCode zrv;
+
+	printf("************ SENDING CREQ TO %llx FROM %llx on %llx/\n",
+	    ep->ze_rnode, ZT_Node_address(znode), ep->ze_nwid);
+
+	data[NZT_OFFS_OPFLAGS] = NZT_OP_CON_REQ;
+	data[NZT_OFFS_VERSION] = NZT_VERSION;
+	NNI_PUT32(data + NZT_OFFS_DST_PORT, ep->ze_rport);
+	NNI_PUT32(data + NZT_OFFS_SRC_PORT, ep->ze_lport);
+	NNI_PUT16(data + NZT_OFFS_CON_PROT, ep->ze_proto);
+
+	zrv = ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
+	    ep->ze_nwid, srcmac, dstmac, NZT_ETHER, 0, data,
+	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
 
 	zt_node_resched(ep->ze_ztn, now);
 }
@@ -1254,7 +1263,7 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t rnode, uint32_t rport)
 	p->zp_dst_port = rport;
 	p->zp_dst_node = rnode;
 	p->zp_proto    = ep->ze_proto;
-	p->zp_src_node = ep->ze_self;
+	p->zp_src_node = ep->ze_lnode;
 
 	if (((rv = nni_aio_init(&p->zp_txaio, zt_pipe_send_cb, p)) != 0) ||
 	    ((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
@@ -1266,7 +1275,8 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t rnode, uint32_t rport)
 	}
 	p->zp_src_port = (uint32_t) port;
 
-	return (NNG_ENOTSUP);
+	*pipep = p;
+	return (0);
 }
 
 static void
@@ -1305,6 +1315,10 @@ static void
 zt_ep_fini(void *arg)
 {
 	zt_ep *ep = arg;
+	nni_aio_stop(ep->ze_creq_aio);
+	nni_aio_stop(ep->ze_cack_aio);
+	nni_aio_fini(ep->ze_creq_aio);
+	nni_aio_fini(ep->ze_cack_aio);
 	NNI_FREE_STRUCT(ep);
 }
 
@@ -1356,6 +1370,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	uint64_t    node;
 	uint64_t    port;
 	int         n;
+	int         rv;
 	char        c;
 	const char *u;
 
@@ -1378,8 +1393,14 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 
 	if ((strncmp(url, "zt://", strlen("zt://")) != 0) ||
 	    (nni_strlcpy(ep->ze_url, url, sz) >= sz)) {
+		zt_ep_fini(ep);
 		return (NNG_EADDRINVAL);
 	}
+	if ((rv = nni_aio_init(&ep->ze_creq_aio, zt_ep_creq_cb, ep)) != 0) {
+		zt_ep_fini(ep);
+		return (rv);
+	}
+
 	*epp = ep;
 	u    = url + strlen("zt://");
 	// Parse the URL.
@@ -1399,6 +1420,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		}
 		ep->ze_lport = 0;
 		ep->ze_rport = (uint32_t) port;
+		ep->ze_rnode = node;
 		break;
 	case NNI_EP_MODE_LISTEN:
 		// Listen mode is just zt://<nwid>:<port>.  The
@@ -1419,7 +1441,6 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		break;
 	}
 
-	ep->ze_node = node;
 	ep->ze_nwid = nwid;
 
 	return (0);
@@ -1432,7 +1453,13 @@ zt_ep_close(void *arg)
 	zt_node *ztn;
 	nni_aio *aio;
 
-	// Cancel any outstanding user operation(s)
+	nni_aio_cancel(ep->ze_creq_aio, NNG_ECLOSED);
+	//	nni_aio_cancel(ep->ze_cack_aio, NNG_ECLOSED);
+
+	// Cancel any outstanding user operation(s) - they should have
+	// been aborted by the above cancellation, but we need to be sure,
+	// as the cancellation callback may not have run yet.
+
 	nni_mtx_lock(&zt_lk);
 	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
 		nni_aio_list_remove(aio);
@@ -1456,28 +1483,26 @@ zt_ep_close(void *arg)
 	nni_mtx_unlock(&zt_lk);
 }
 
-static int
+static void
 zt_ep_join(zt_ep *ep)
 {
 	enum ZT_ResultCode       zrv;
 	zt_node *                ztn = ep->ze_ztn;
-	ZT_VirtualNetworkConfig *vcfg;
+	ZT_VirtualNetworkConfig *cf;
 
-	if ((zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL)) !=
-	    ZT_RESULT_OK) {
+	zrv = ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
+	if ((zrv != ZT_RESULT_OK) && (zrv != ZT_RESULT_OK_IGNORED)) {
 		zt_node_rele(ztn);
-		return (zt_result(zrv));
+		return;
 	}
 
-	if ((vcfg = ZT_Node_networkConfig(ztn->zn_znode, ep->ze_nwid)) !=
-	    NULL) {
-		NNI_ASSERT(vcfg->nwid == ep->ze_nwid);
-		ep->ze_maxmtu = vcfg->mtu;
-		ep->ze_phymtu = vcfg->physicalMtu;
-		NNI_ASSERT(ep->ze_mac == vcfg->mac);
-		ZT_Node_freeQueryResult(ztn->zn_znode, vcfg);
+	if ((cf = ZT_Node_networkConfig(ztn->zn_znode, ep->ze_nwid)) != NULL) {
+		NNI_ASSERT(cf->nwid == ep->ze_nwid);
+		ep->ze_maxmtu = cf->mtu;
+		ep->ze_phymtu = cf->physicalMtu;
+		NNI_ASSERT(ep->ze_mac == cf->mac);
+		ZT_Node_freeQueryResult(ztn->zn_znode, cf);
 	}
-	return (0);
 }
 
 static int
@@ -1533,11 +1558,11 @@ zt_ep_bind(void *arg)
 		return (rv);
 	}
 	nni_list_append(&ztn->zn_eplist, ep);
-	ep->ze_self = ztn->zn_self;
-	ep->ze_mac  = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
-	ep->ze_ztn  = ztn;
+	ep->ze_lnode = ztn->zn_self;
+	ep->ze_mac   = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+	ep->ze_ztn   = ztn;
 
-	(void) zt_ep_join(ep);
+	zt_ep_join(ep);
 	nni_mtx_unlock(&zt_lk);
 
 	return (0);
@@ -1627,19 +1652,21 @@ static void
 zt_ep_creq_cb(void *arg)
 {
 	zt_ep *  ep  = arg;
-	nni_aio *aio = ep->ze_aio;
+	nni_aio *aio = ep->ze_creq_aio;
 	nni_aio *uaio;
 	int      rv;
+
+	NNI_ASSERT(ep->ze_mode == NNI_EP_MODE_DIAL);
 
 	rv = nni_aio_result(aio);
 	switch (rv) {
 	case 0:
-		// Good connect. Create a pipe.
+		// Good connect. Create a pipe, send the cack.
 		printf("ACK RECVD OK?\n");
 		break;
 	case NNG_ETIMEDOUT:
 		nni_mtx_lock(&zt_lk);
-		if (nni_clock() > ep->ze_creq_start + NZT_CONN_MAXTIME) {
+		if (ep->ze_creq_try > NZT_CONN_ATTEMPTS) {
 			// We need to give up.
 			while ((uaio = nni_list_first(&ep->ze_aios)) != NULL) {
 				nni_aio_list_remove(uaio);
@@ -1649,11 +1676,12 @@ zt_ep_creq_cb(void *arg)
 			return;
 		}
 
-		// Timed out, but our master timer has not expired, so
-		// send another.
-		zt_send_creq(ep, ep->ze_node, ep->ze_rport, ep->ze_creq_acked);
+		// Timed out, try again. (We have more attempts.)
+		ep->ze_creq_try++;
 		nni_aio_set_timeout(aio, nni_clock() + NZT_CONN_INTERVAL);
 		nni_aio_start(aio, zt_ep_creq_cancel, ep);
+		zt_ep_send_creq(ep);
+		nni_mtx_unlock(&zt_lk);
 	}
 }
 
@@ -1663,12 +1691,8 @@ zt_ep_connect(void *arg, nni_aio *aio)
 	zt_ep *  ep = arg;
 	uint64_t port;
 	zt_node *ztn;
+	zt_pipe *p;
 	int      rv;
-
-	if ((rv = nni_aio_init(&ep->ze_aio, zt_ep_creq_cb, ep)) != 0) {
-		nni_aio_finish_error(aio, rv);
-		return;
-	}
 
 	nni_mtx_lock(&zt_lk);
 	if ((rv = zt_node_find(&ztn, ep->ze_home)) != 0) {
@@ -1677,38 +1701,37 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		return;
 	}
 
-	// PLAN B:  Create a Pipe.  Put that into neg mode.
-	// Pipe will send details.....
-
-	// Allocate an ephemeral port.  We will keep this one
-	// forever.
-	if (ep->ze_lport == 0) {
-		// ask for an ephemeral port
-		rv = nni_idhash_alloc(ztn->zn_ports, &port, ep);
-		if (rv == 0) {
-			NNI_ASSERT(port <= NZT_MAX_PORT);
-			NNI_ASSERT(port & NZT_EPHEMERAL);
-			ep->ze_lport = (uint32_t) port;
-		}
-		nni_list_append(&ztn->zn_eplist, ep);
+#if 0
+	// Create a pipe.  We won't hand this back to the user yet,
+	// but instead hold it until we get the ack back from the
+	// server. This lets us detect a CONN_REFUSED condition.
+	if ((rv = zt_pipe_init(&p, ep, ep->ze_rnode, ep->ze_rport)) != 0) {
+		zt_node_rele(ztn);
+		nni_mtx_unlock(&zt_lk);
 	}
+#endif
 
-	// Force a maximum timeout for connect.
-	// XXX: This should probably be tunable.
-	if (aio->a_expire > (nni_clock() + NZT_CONN_MAXTIME)) {
-		aio->a_expire = nni_clock() + NZT_CONN_MAXTIME;
-	}
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
+		nni_time now;
+
 		nni_aio_list_append(&ep->ze_aios, aio);
 
-		ep->ze_ztn  = ztn;
-		ep->ze_self = ztn->zn_self;
-		ep->ze_mac  = zt_node_to_mac(ep->ze_self, ep->ze_nwid);
+		now             = nni_clock();
+		ep->ze_ztn      = ztn;
+		ep->ze_lnode    = ztn->zn_self;
+		ep->ze_mac      = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
+		ep->ze_creq_try = 1;
 
-		(void) zt_ep_join(ep);
-		// We send out the first connect message.  This may
-		// fail if the network isn't estaablished yet.  That's ok.
-		zt_send_creq(ep, ep->ze_node, ep->ze_rport, 0);
+		zt_ep_join(ep);
+		nni_aio_set_timeout(ep->ze_creq_aio, now + NZT_CONN_INTERVAL);
+		// This can't fail -- the only way the ze_creq_aio gets
+		// terminated would have required us to have also canceled
+		// the user AIO and held the lock.
+		(void) nni_aio_start(ep->ze_creq_aio, zt_ep_creq_cancel, ep);
+
+		// We send out the first connect message; it we are not
+		// yet connected the message will be dropped.
+		zt_ep_send_creq(ep);
 	}
 	nni_mtx_unlock(&zt_lk);
 }

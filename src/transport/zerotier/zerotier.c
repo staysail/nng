@@ -1651,7 +1651,8 @@ zt_ep_creq_cancel(nni_aio *aio, int rv)
 static void
 zt_ep_creq_cb(void *arg)
 {
-	zt_ep *  ep  = arg;
+	zt_ep *  ep = arg;
+	zt_pipe *p;
 	nni_aio *aio = ep->ze_creq_aio;
 	nni_aio *uaio;
 	int      rv;
@@ -1662,7 +1663,21 @@ zt_ep_creq_cb(void *arg)
 	switch (rv) {
 	case 0:
 		// Good connect. Create a pipe, send the cack.
-		printf("ACK RECVD OK?\n");
+		nni_mtx_lock(&zt_lk);
+		// Already canceled?
+		if ((uaio = nni_list_first(&ep->ze_aios)) == NULL) {
+			nni_mtx_unlock(&zt_lk);
+			return;
+		}
+		nni_aio_list_remove(uaio);
+		rv = zt_pipe_init(&p, ep, ep->ze_rnode, ep->ze_rport);
+		if (rv != 0) {
+			nni_mtx_unlock(&zt_lk);
+			nni_aio_finish_error(uaio, rv);
+			return;
+		}
+		nni_aio_finish_pipe(uaio, p);
+		nni_mtx_unlock(&zt_lk);
 		break;
 	case NNG_ETIMEDOUT:
 		nni_mtx_lock(&zt_lk);
@@ -1682,6 +1697,15 @@ zt_ep_creq_cb(void *arg)
 		nni_aio_start(aio, zt_ep_creq_cancel, ep);
 		zt_ep_send_creq(ep);
 		nni_mtx_unlock(&zt_lk);
+		break;
+	default:
+		nni_mtx_lock(&zt_lk);
+		if ((uaio = nni_list_first(&ep->ze_aios)) != NULL) {
+			nni_aio_list_remove(uaio);
+			nni_aio_finish_error(uaio, rv);
+		}
+		nni_mtx_unlock(&zt_lk);
+		break;
 	}
 }
 

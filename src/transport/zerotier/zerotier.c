@@ -83,9 +83,7 @@ typedef struct zt_node zt_node;
 #define NZT_OFFS_VERSION 1
 #define NZT_OFFS_DST_PORT 2 // includes reserved high order bits
 #define NZT_OFFS_SRC_PORT 6 // includes reserved high order bits
-
-#define NZT_OFFS_CON_PROT 10
-#define NZT_SIZE_CON 12
+#define NZT_OFFS_PAYLOAD 10
 
 #define NZT_OFFS_DAT_MSGID 10
 #define NZT_OFFS_DAT_FRLEN 12
@@ -167,6 +165,7 @@ struct zt_node {
 	nni_idhash *  zn_ports;
 	nni_idhash *  zn_eps;
 	nni_idhash *  zn_pipes;
+	nni_idhash *  zn_rpipes; // indexed by remote address
 	nni_aio *     zn_rcv4_aio;
 	char *        zn_rcv4_buf;
 	nng_sockaddr  zn_rcv4_addr;
@@ -187,10 +186,12 @@ struct zt_pipe {
 	size_t        zp_rcvmax;
 	nni_aio *     zp_user_txaio;
 	nni_aio *     zp_user_rxaio;
-	uint32_t      zp_src_port;
-	uint32_t      zp_dst_port;
-	uint64_t      zp_dst_node;
-	uint64_t      zp_src_node;
+	uint32_t      zp_lport;
+	uint32_t      zp_rport;
+	uint64_t      zp_lnode;
+	uint64_t      zp_rnode;
+	uint64_t      zp_nwid;
+	uint64_t      zp_raddr; // formed from rnode and rport
 	zt_node *     zp_ztn;
 
 	// XXX: fraglist
@@ -206,13 +207,13 @@ struct zt_pipe {
 typedef struct zt_creq zt_creq;
 struct zt_creq {
 	uint64_t cr_time;
-	uint64_t cr_peer_addr;
-	uint32_t cr_peer_port;
+	uint64_t cr_rnode;
+	uint32_t cr_rport;
 	uint16_t cr_proto;
 };
 
 #define NZT_LISTENQ 128
-#define NZT_LISTEN_EXPIRE 60 // seconds before we give up in the backlog
+#define NZT_LISTEN_EXPIRE 60000000 // maximum time in backlog
 
 struct zt_ep {
 	nni_list_node ze_link;
@@ -272,6 +273,13 @@ static nni_list zt_nodes;
 
 static void zt_ep_send_creq(zt_ep *);
 static void zt_ep_creq_cb(void *);
+
+static uint64_t
+zt_now(void)
+{
+	// We return msec
+	return (nni_clock() / 1000);
+}
 
 static void
 zt_bgthr(void *arg)
@@ -341,7 +349,7 @@ zt_node_rcv4_cb(void *arg)
 	    htons(sin->sin_port));
 
 	nni_mtx_lock(&zt_lk);
-	now = nni_clock() / 1000; // msec
+	now = zt_now();
 
 	// We are not going to perform any validation of the data; we
 	// just pass this straight into the ZeroTier core.
@@ -395,7 +403,7 @@ zt_node_rcv6_cb(void *arg)
 	    htons(sin6->sin6_port));
 
 	nni_mtx_lock(&zt_lk);
-	now = nni_clock() / 1000; // msec
+	now = zt_now(); // msec
 
 	// We are not going to perform any validation of the data; we
 	// just pass this straight into the ZeroTier core.
@@ -483,8 +491,8 @@ zt_result(enum ZT_ResultCode rv)
 
 // ZeroTier Node API callbacks
 static int
-zt_virtual_network_config(ZT_Node *node, void *userptr, void *thr,
-    uint64_t nwid, void **netptr, enum ZT_VirtualNetworkConfigOperation op,
+zt_virtual_config(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
+    void **netptr, enum ZT_VirtualNetworkConfigOperation op,
     const ZT_VirtualNetworkConfig *config)
 {
 	zt_node *ztn = userptr;
@@ -535,66 +543,70 @@ zt_virtual_network_config(ZT_Node *node, void *userptr, void *thr,
 }
 
 static void
-zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t dstnode, uint32_t srcport,
-    uint32_t dstport, uint8_t err, char *msg)
+zt_send_err(zt_node *ztn, uint64_t nwid, uint32_t lport, uint64_t rnode,
+    uint32_t rport, uint8_t err, const char *msg)
 {
 	uint8_t  data[128];
 	uint64_t srcmac = zt_node_to_mac(ztn->zn_self, nwid);
-	uint64_t dstmac = zt_node_to_mac(dstnode, nwid);
+	uint64_t dstmac = zt_node_to_mac(rnode, nwid);
 	uint64_t now;
 
 	NNI_ASSERT((strlen(msg) + NZT_OFFS_ERR_MSG) < sizeof(data));
 
 	data[NZT_OFFS_OPFLAGS] = NZT_OP_ERR;
 	data[NZT_OFFS_VERSION] = NZT_VERSION;
-	NNI_PUT32(data + NZT_OFFS_DST_PORT, dstport);
-	NNI_PUT32(data + NZT_OFFS_SRC_PORT, srcport);
+	NNI_PUT32(data + NZT_OFFS_DST_PORT, rport);
+	NNI_PUT32(data + NZT_OFFS_SRC_PORT, lport);
 	data[NZT_OFFS_ERR_CODE] = err;
 	nni_strlcpy((char *) data + NZT_OFFS_ERR_MSG, msg,
 	    sizeof(data) - NZT_OFFS_ERR_MSG);
 
-	now = nni_clock() / 1000;
-	ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now, nwid,
-	    srcmac, dstmac, NZT_ETHER, 0, data, strlen(msg) + NZT_OFFS_ERR_MSG,
-	    &now);
+	now = zt_now();
+	(void) ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now,
+	    nwid, srcmac, dstmac, NZT_ETHER, 0, data,
+	    strlen(msg) + NZT_OFFS_ERR_MSG, &now);
 
 	zt_node_resched(ztn->zn_znode, now);
 }
 
 static void
-zt_send_cack(zt_ep *ep, uint64_t rnode, uint32_t rport)
+zt_pipe_send_err(zt_pipe *p, uint8_t code, const char *msg)
 {
-	uint8_t            data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
-	uint64_t           srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
-	uint64_t           dstmac = zt_node_to_mac(rnode, ep->ze_nwid);
-	ZT_Node *          znode  = ep->ze_ztn->zn_znode;
-	uint64_t           now    = nni_clock();
-	enum ZT_ResultCode zrv;
+	zt_send_err(p->zp_ztn, p->zp_nwid, p->zp_lport, p->zp_rnode,
+	    p->zp_rport, code, msg);
+}
 
-	printf("************ SENDING CACK TO %llx FROM %llx on %llx/\n", rnode,
-	    ZT_Node_address(znode), ep->ze_nwid);
+static void
+zt_pipe_send_cack(zt_pipe *p)
+{
+	uint8_t  data[NZT_OFFS_PAYLOAD + sizeof(uint16_t)];
+	uint64_t srcmac = zt_node_to_mac(p->zp_lnode, p->zp_nwid);
+	uint64_t dstmac = zt_node_to_mac(p->zp_rnode, p->zp_nwid);
+	ZT_Node *znode  = p->zp_ztn->zn_znode;
+	nni_time now;
 
 	data[NZT_OFFS_OPFLAGS] = NZT_OP_CON_ACK;
 	data[NZT_OFFS_VERSION] = NZT_VERSION;
-	NNI_PUT32(data + NZT_OFFS_DST_PORT, rport);
-	NNI_PUT32(data + NZT_OFFS_SRC_PORT, ep->ze_lport);
-	NNI_PUT16(data + NZT_OFFS_CON_PROT, ep->ze_proto);
+	NNI_PUT32(data + NZT_OFFS_DST_PORT, p->zp_rport);
+	NNI_PUT32(data + NZT_OFFS_SRC_PORT, p->zp_lport);
+	NNI_PUT16(data + NZT_OFFS_PAYLOAD, p->zp_proto);
 
-	zrv = ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
-	    ep->ze_nwid, srcmac, dstmac, NZT_ETHER, 0, data,
-	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
+	now = zt_now();
+	(void) ZT_Node_processVirtualNetworkFrame(znode, NULL, now, p->zp_nwid,
+	    srcmac, dstmac, NZT_ETHER, 0, data,
+	    NZT_OFFS_PAYLOAD + sizeof(uint16_t), &now);
 
-	zt_node_resched(ep->ze_ztn, now);
+	zt_node_resched(p->zp_ztn, now);
 }
 
 static void
 zt_ep_send_creq(zt_ep *ep)
 {
-	uint8_t  data[NZT_OFFS_CON_PROT + sizeof(uint16_t)];
+	uint8_t  data[NZT_OFFS_PAYLOAD + sizeof(uint16_t)];
 	uint64_t srcmac = zt_node_to_mac(ep->ze_lnode, ep->ze_nwid);
 	uint64_t dstmac = zt_node_to_mac(ep->ze_rnode, ep->ze_nwid);
-	uint64_t now    = nni_clock();
-	ZT_Node *znode  = ep->ze_ztn->zn_znode;
+	uint64_t now;
+	ZT_Node *znode = ep->ze_ztn->zn_znode;
 
 	printf("==> SENDING CREQ TO %llx (%llx) FROM %llx (%llx) on %llx\n",
 	    ep->ze_rnode, dstmac, ep->ze_lnode, srcmac, ep->ze_nwid);
@@ -603,127 +615,179 @@ zt_ep_send_creq(zt_ep *ep)
 	data[NZT_OFFS_VERSION] = NZT_VERSION;
 	NNI_PUT32(data + NZT_OFFS_DST_PORT, ep->ze_rport);
 	NNI_PUT32(data + NZT_OFFS_SRC_PORT, ep->ze_lport);
-	NNI_PUT16(data + NZT_OFFS_CON_PROT, ep->ze_proto);
+	NNI_PUT16(data + NZT_OFFS_PAYLOAD, ep->ze_proto);
 
-	(void) ZT_Node_processVirtualNetworkFrame(znode, NULL, now / 1000,
+	now = zt_now();
+	(void) ZT_Node_processVirtualNetworkFrame(znode, NULL, now,
 	    ep->ze_nwid, srcmac, dstmac, NZT_ETHER, 0, data,
-	    NZT_OFFS_CON_PROT + sizeof(uint16_t), &now);
+	    NZT_OFFS_PAYLOAD + sizeof(uint16_t), &now);
 
 	zt_node_resched(ep->ze_ztn, now);
+}
+
+static void
+zt_ep_send_err(
+    zt_ep *ep, uint64_t rnode, uint32_t rport, uint8_t code, const char *msg)
+{
+	zt_send_err(
+	    ep->ze_ztn, ep->ze_nwid, ep->ze_lport, rnode, rport, code, msg);
+}
+
+static void
+zt_ep_virtual_recv(zt_ep *ep, uint8_t opflags, uint64_t rnode, uint32_t rport,
+    const uint8_t *data, size_t len)
+{
+	zt_node *ztn   = ep->ze_ztn;
+	uint32_t lport = ep->ze_lport;
+	uint64_t nwid  = ep->ze_nwid;
+	uint64_t raddr;
+	zt_creq *creq;
+	zt_pipe *p;
+
+	raddr = rnode;
+	raddr <<= 24;
+	raddr |= rport;
+
+	switch (opflags) {
+	case NZT_OP_CON_REQ:
+		// Good op, let's check the peer port for validity.
+		if ((rport > NZT_MAX_PORT) || (rport == 0)) {
+			zt_ep_send_err(ep, rnode, rport, NZT_EPROTERR,
+			    "Invalid source port");
+			return;
+		}
+		break;
+	default:
+		zt_ep_send_err(ep, rnode, rport, NZT_EPROTERR,
+		    "Unknown endpoint operation");
+		return;
+	}
+
+	if (len != sizeof(uint16_t)) {
+		zt_ep_send_err(
+		    ep, rnode, rport, NZT_EPROTERR, "Bad message length");
+		return;
+	}
+
+	// Situations:
+	// a) We may already have a pipe open with the same, in which case
+	//    we just want to reply with the same conversation details.
+	// b) We have already got a request, but not yet accepted.  In this
+	//    case we do nothing.
+	// c) This is the first request we've seen, so record it, and possibly
+	//    run the accept logic.
+
+	if ((nni_idhash_find(ztn->zn_rpipes, raddr, (void **) &p)) == 0) {
+		// We already have an open pipe for this, so just resend ACK.
+		zt_pipe_send_cack(p);
+		return;
+	}
+
+	for (int i = ep->ze_creq_tail; i != ep->ze_creq_head; i++) {
+		creq = &ep->ze_creqs[i % NZT_LISTENQ];
+
+		if ((creq->cr_rnode == rnode) && (creq->cr_rport == rport)) {
+			// We already have this pending.
+			return;
+		}
+	}
+
+	if ((ep->ze_creq_tail + NZT_LISTENQ) == ep->ze_creq_head) {
+		// We have taken as many as we can, so just drop it.
+		return;
+	}
+
+	// Record the request to create a pipe, and then process any
+	// pending accept requests.
+	creq = &ep->ze_creqs[ep->ze_creq_head % NZT_LISTENQ];
+	NNI_GET16(data, creq->cr_proto);
+	creq->cr_rnode = rnode;
+	creq->cr_rport = rport;
+	creq->cr_time  = nni_clock() + NZT_LISTEN_EXPIRE;
+	NNI_GET16(data, creq->cr_proto);
+	ep->ze_creq_head++;
 }
 
 // This function is called when a frame arrives on the
 // *virtual* network.
 static void
-zt_virtual_network_frame(ZT_Node *node, void *userptr, void *thr,
-    uint64_t netid, void **netptr, uint64_t srcmac, uint64_t dstmac,
-    unsigned int ethertype, unsigned int vlanid, const void *data,
-    unsigned int len)
+zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
+    void **netptr, uint64_t srcmac, uint64_t dstmac, unsigned int ethertype,
+    unsigned int vlanid, const void *payload, unsigned int len)
 {
 	zt_node *      ztn = userptr;
 	uint8_t        opflags;
-	const uint8_t *p = data;
+	const uint8_t *data = payload;
 	uint16_t       proto;
-	uint32_t       srcport;
-	uint32_t       dstport;
-	uint64_t       srcconv;
-	uint64_t       dstconv;
-	uint64_t       srcnode;
-	uint64_t       dstnode;
+	uint32_t       rport;
+	uint32_t       lport;
+	uint64_t       rnode;
+	uint64_t       lnode;
+	zt_ep *        ep;
+	zt_pipe *      p;
 
-	dstnode = zt_mac_to_node(dstmac, netid);
-	srcnode = zt_mac_to_node(srcmac, netid);
+	lnode = zt_mac_to_node(dstmac, nwid);
+	rnode = zt_mac_to_node(srcmac, nwid);
 
 	printf("VIRTUAL NET FRAME RECVD\n");
-	if (ethertype != NZT_ETHER) {
-		// This is a weird frame we can't use, just
-		// throw it away.
-		printf("DEBUG: WRONG ETHERTYPE %x\n", ethertype);
+	if ((ethertype != NZT_ETHER) || (len < NZT_OFFS_PAYLOAD) ||
+	    (data[NZT_OFFS_VERSION] != NZT_VERSION) ||
+	    (lnode != ztn->zn_self)) {
+
+		// This is a weird frame we can't use, just drop it.
 		return;
 	}
 
-	if (len < (NZT_OFFS_SRC_PORT + 4)) {
-		printf("DEBUG: RUNT len %d", len);
+	opflags = data[NZT_OFFS_OPFLAGS];
+	NNI_GET32(data + NZT_OFFS_DST_PORT, lport);
+	NNI_GET32(data + NZT_OFFS_SRC_PORT, rport);
+
+	payload += NZT_OFFS_PAYLOAD;
+	len -= NZT_OFFS_PAYLOAD;
+
+	// NB: We are holding the zt_lock!
+	if ((nni_idhash_find(ztn->zn_eps, lport, (void **) &ep) == 0) &&
+	    (ep->ze_nwid == nwid)) {
+		// direct this to an endpoint.
+		zt_ep_virtual_recv(ep, opflags, rnode, rport, data, len);
 		return;
 	}
 
-	// XXX: arguably we should check the dstmac...
-	// XXX: check frame type.
-
-	opflags = p[NZT_OFFS_OPFLAGS];
-	if (p[NZT_OFFS_VERSION] != NZT_VERSION) {
-		// Wrong version, drop it.  (Log?)
-		printf("DEBUG: BAD ZT_VERSION %2x", p[1]);
-		return;
+	// Look up a pipe, but also we use this chance to check
+	// that the source address matches what the pipe was
+	// established with.  If it does not, we're going to discard
+	// it.
+	if ((nni_idhash_find(ztn->zn_pipes, lport, (void **) &p) == 0) &&
+	    (p->zp_nwid == nwid)) {
+		// XXX: check source address against pipe
+		// if it does not match then we send an error to
+		// the sender.
+		//
+		// If it *does* match, then we call
+		// zt_pipe_virtual_recv(p, opflags, data, len);
 	}
 
-	NNI_GET32(p + NZT_OFFS_DST_PORT, dstport);
-	if ((dstport > NZT_MAX_PORT) || (dstport < 1)) {
-		printf("DEBUG: INVALID destination port\n");
-		return;
-	}
-	NNI_GET32(p + NZT_OFFS_SRC_PORT, srcport);
-	if ((srcport > NZT_MAX_PORT) || (srcport < 1)) {
-		printf("DEBUG: INVALID source port\n");
-		return;
-	}
-
-	dstconv = (dstnode << 24) | dstport;
-	srcconv = (srcnode << 24) | srcport;
-
+	// We have a request for which we have no listener, and no pipe.
+	// For some of these we send back a NAK, but for others we just
+	// drop the frame.
 	switch (opflags) {
 	case NZT_OP_CON_REQ:
-	// Look for a matching listener.  If one is found,
-	// create a pipe, send an ack.
-	case NZT_OP_CON_ACK:
-	// Three cases:
-	// 1. Matching waiting dialer.  In this case, create
-	// the pipe,
-	//    (ready for sending), and send an ack to the
-	//    listener.
-	// 2. Matching waiting listener.  In this case a pipe
-	// should
-	//    exist, so just mark it ready for sending.  (It
-	//    could already receive.)  Arguably if we received
-	//    a message, we wouldn't need the CON_ACK.
-	// 3. No endpoint.  Send an error.
-	case NZT_OP_PNG_REQ:
-	// Look for matching pipe.  If none found, send an
-	// error, otherwise send an ack.  Update timestamps.
-	case NZT_OP_PNG_ACK:
-	// Update timestamps, no further action.
-	case NZT_OP_DIS:
-	// Look for matching pipe.  If found, disconnect.
-	// (Maybe disconnect pending connreq too?)
-	case NZT_OP_DAT:
-	case NZT_OP_DAT | NZT_FLAG_MF:
-	case NZT_OP_ERR:
-	default:
-		printf("DEBUG: BAD ZT_OP %x", opflags);
-	}
-
-	switch (opflags & 0xf0) {
-	case NZT_OP_CON:
-		if (len < NZT_OFFS_CON_PROT + 2) {
-			printf("DEBUG: Missing protocol number in CON");
-			return;
-		}
-		NNI_GET16(p + NZT_OFFS_CON_PROT, proto);
-
-		// Lets see if we have an endpoint..
-		break;
-	// XXX: incoming connection request.
-	case NZT_OP_DIS:
-	// XXX: look for a matching convo, and close it.
-	case NZT_OP_ERR:
-	// XXX: look for a matching convo, and fail it, or if
-	// we have a connect request pending, fail that
-	case NZT_OP_PNG:
-	// XXX: look for a matching convo, and send a ping ack
-	// (updating things).
-	default:
-		printf("DEBUG: BAD ZT_OP %x", opflags);
+		// No listener.  Connection refused.
+		zt_send_err(ztn, nwid, lport, rnode, rport, NZT_EREFUSED,
+		    "Connection refused");
 		return;
+	case NZT_OP_DAT:
+	case NZT_OP_PNG_REQ:
+	case NZT_OP_CON_ACK:
+		zt_send_err(ztn, nwid, lport, rnode, rport, NZT_ENOTCONN,
+		    "Not connected");
+		break;
+	case NZT_OP_ERR:
+	case NZT_OP_PNG_ACK:
+	case NZT_OP_DIS:
+	default:
+		// Just drop these.
+		break;
 	}
 }
 
@@ -978,8 +1042,8 @@ static struct ZT_Node_Callbacks zt_callbacks = {
 	.statePutFunction             = zt_state_put,
 	.stateGetFunction             = zt_state_get,
 	.wirePacketSendFunction       = zt_wire_packet_send,
-	.virtualNetworkFrameFunction  = zt_virtual_network_frame,
-	.virtualNetworkConfigFunction = zt_virtual_network_config,
+	.virtualNetworkFrameFunction  = zt_virtual_recv,
+	.virtualNetworkConfigFunction = zt_virtual_config,
 	.eventCallback                = zt_event_cb,
 	.pathCheckFunction            = NULL,
 	.pathLookupFunction           = NULL,
@@ -1015,6 +1079,7 @@ zt_node_destroy(zt_node *ztn)
 	nni_aio_fini(ztn->zn_rcv6_aio);
 	nni_idhash_fini(ztn->zn_eps);
 	nni_idhash_fini(ztn->zn_pipes);
+	nni_idhash_fini(ztn->zn_rpipes);
 	nni_cv_fini(&ztn->zn_bgcv);
 	NNI_FREE_STRUCT(ztn);
 }
@@ -1057,6 +1122,7 @@ zt_node_create(zt_node **ztnp, const char *path)
 	if (((rv = nni_idhash_init(&ztn->zn_ports)) != 0) ||
 	    ((rv = nni_idhash_init(&ztn->zn_eps)) != 0) ||
 	    ((rv = nni_idhash_init(&ztn->zn_pipes)) != 0) ||
+	    ((rv = nni_idhash_init(&ztn->zn_rpipes)) != 0) ||
 	    ((rv = nni_thr_init(&ztn->zn_bgthr, zt_bgthr, ztn)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp4, &sa4)) != 0) ||
 	    ((rv = nni_plat_udp_open(&ztn->zn_udp6, &sa6)) != 0)) {
@@ -1073,8 +1139,7 @@ zt_node_create(zt_node **ztnp, const char *path)
 	    (nni_random() % (NZT_MAX_PORT - NZT_EPHEMERAL)) + NZT_EPHEMERAL);
 
 	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
-	zrv = ZT_Node_new(
-	    &ztn->zn_znode, ztn, NULL, &zt_callbacks, nni_clock() / 1000);
+	zrv = ZT_Node_new(&ztn->zn_znode, ztn, NULL, &zt_callbacks, zt_now());
 	if (zrv != ZT_RESULT_OK) {
 		zt_node_destroy(ztn);
 		return (zt_result(zrv));
@@ -1226,12 +1291,13 @@ zt_pipe_fini(void *arg)
 	nni_aio_stop(p->zp_txaio);
 	nni_aio_stop(p->zp_negaio);
 
-	port = p->zp_src_port;
+	port = p->zp_lport;
 	if (port != 0) {
 		// This tosses the connection details and all state.
 		nni_mtx_lock(&zt_lk);
 		nni_idhash_remove(ztn->zn_pipes, port);
 		nni_idhash_remove(ztn->zn_ports, port);
+		nni_idhash_remove(ztn->zn_rpipes, p->zp_raddr);
 		nni_mtx_unlock(&zt_lk);
 	}
 	NNI_FREE_STRUCT(p);
@@ -1259,25 +1325,33 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t rnode, uint32_t rport)
 	uint64_t port = 0;
 	int      rv;
 	zt_node *ztn = ep->ze_ztn;
+	uint64_t raddr;
+
+	raddr = rnode;
+	raddr <<= 24;
+	raddr |= rport;
 
 	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
 		return (NNG_ENOMEM);
 	}
-	p->zp_ztn      = ztn;
-	p->zp_dst_port = rport;
-	p->zp_dst_node = rnode;
-	p->zp_proto    = ep->ze_proto;
-	p->zp_src_node = ep->ze_lnode;
+	p->zp_ztn   = ztn;
+	p->zp_rport = rport;
+	p->zp_rnode = rnode;
+	p->zp_proto = ep->ze_proto;
+	p->zp_lnode = ep->ze_lnode;
+	p->zp_nwid  = ep->ze_nwid;
+	p->zp_raddr = raddr;
 
 	if (((rv = nni_aio_init(&p->zp_txaio, zt_pipe_send_cb, p)) != 0) ||
 	    ((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
 	    ((rv = nni_aio_init(&p->zp_negaio, zt_pipe_nego_cb, p)) != 0) ||
 	    ((rv = nni_idhash_alloc(ztn->zn_ports, &port, p)) != 0) ||
-	    ((rv = nni_idhash_insert(ztn->zn_pipes, port, p)) != 0)) {
-		p->zp_src_port = (uint32_t) port;
+	    ((rv = nni_idhash_insert(ztn->zn_pipes, port, p)) != 0) ||
+	    ((rv = nni_idhash_insert(ztn->zn_rpipes, raddr, p)) != 0)) {
+		p->zp_lport = (uint32_t) port;
 		zt_pipe_fini(p);
 	}
-	p->zp_src_port = (uint32_t) port;
+	p->zp_lport = (uint32_t) port;
 
 	*pipep = p;
 	return (0);
@@ -1458,8 +1532,8 @@ zt_ep_close(void *arg)
 	nni_aio_cancel(ep->ze_creq_aio, NNG_ECLOSED);
 
 	// Cancel any outstanding user operation(s) - they should have
-	// been aborted by the above cancellation, but we need to be sure,
-	// as the cancellation callback may not have run yet.
+	// been aborted by the above cancellation, but we need to be
+	// sure, as the cancellation callback may not have run yet.
 
 	nni_mtx_lock(&zt_lk);
 	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
@@ -1557,6 +1631,8 @@ zt_ep_doaccept(zt_ep *ep)
 {
 	// Call with ep lock held.
 	nni_time now;
+	zt_pipe *p;
+	int      rv;
 
 	now = nni_clock();
 	// Consume any timedout connect requests.
@@ -1586,12 +1662,16 @@ zt_ep_doaccept(zt_ep *ep)
 		// being canceled.
 		nni_aio_list_remove(aio);
 
-		// Now we need to create a pipe, send the
-		// notice to the user, and finish the request.
-		// For now we are pretty lame and just return
-		// NNG_EINTERNAL.
+		rv = zt_pipe_init(&p, ep, creq.cr_rnode, creq.cr_rport);
+		if (rv != 0) {
+			zt_ep_send_err(ep, creq.cr_rnode, creq.cr_rport,
+			    NZT_EUNKNOWN, "Unable to create pipe");
+			nni_aio_finish_error(aio, rv);
+			continue;
+		}
+		p->zp_peer = creq.cr_proto;
 
-		nni_aio_finish_error(aio, NNG_EINTERNAL);
+		nni_aio_finish_pipe(aio, p);
 	}
 }
 
@@ -1702,8 +1782,8 @@ zt_ep_connect(void *arg, nni_aio *aio)
 
 		nni_aio_set_timeout(ep->ze_creq_aio, now + NZT_CONN_INTERVAL);
 		// This can't fail -- the only way the ze_creq_aio gets
-		// terminated would have required us to have also canceled
-		// the user AIO and held the lock.
+		// terminated would have required us to have also
+		// canceled the user AIO and held the lock.
 		(void) nni_aio_start(ep->ze_creq_aio, zt_ep_creq_cancel, ep);
 
 		// We send out the first connect message; it we are not

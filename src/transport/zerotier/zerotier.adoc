@@ -216,7 +216,8 @@ ID in the 4-byte payload, with the `AK` flag set.   Additionally,
 the source port number that the responder replies with MAY be different
 than the one the intiator requested.  The reason for this is to allow
 a responder to use these port numbers to uniquely identify a new
-conversation.
+conversation.  (This will be the typical case, where an ephemeral port
+number is allocated for the conversation.)
 
 Alternatively, a responder may reject the connection attempt by
 sending a suitably formed ERR message (see below).
@@ -225,20 +226,18 @@ If a sender does not receive a reply, it SHOULD retry this message
 before giving up and reporting an error to the user.  It is recommended
 that a configurable number of retries and time interval be used.
 Given modern Internet latencies of generally less than 500 ms, resending
-up to 5 CONN requests, once every second, before giving up seems
-reasonable.
+up to 12 CONN requests, once every 5 seconds, before giving up seems
+reasonable.  (These times are somewhat larger to allow for ZeroTier
+path discovery to take place; this results in a timeout of approximately
+a minute.)
 
-A connection intiator MUST reply to an `AK` from the responder with
-yet another ACK.  The responder MUST NOT reply to an `AK` from the
-initiator except that it may reply with an ERR if the connection does
-not exist.
+The initiator MUST NOT send any `DATA` messages for a conversation until
+it has received an ACK from the other party, and it MUST send all further
+messages for the conversation to the port number supplied by the responder.
 
-Both parties MUST NOT send any `DATA` messages for a connection until
-they have received an ACK from the other party.
-
-If a `CONN` frame is received for a session that already exists, the
-receiver MUST reply.  Further, the source port it replies with, and
-the SP protocol IDs MUST be identical to what it first sent.  This
+If a `CONN` frame is received by a responder for a conversation that already
+exists, the responder MUST reply.  Further, the source port it replies with,
+and the SP protocol IDs MUST be identical to what it first sent.  This
 ensures that the `CONN` request is idempotent.
 
 DISC messages

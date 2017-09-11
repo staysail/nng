@@ -256,7 +256,6 @@ struct zt_ep {
 	nni_list      ze_aios;
 	int           ze_maxmtu;
 	int           ze_phymtu;
-	zt_pipe *     ze_cpipe; // Waiting client pipe
 
 	// Incoming connection requests (server only).  We only
 	// only have "accepted" requests -- that is we won't have an
@@ -293,7 +292,7 @@ static nni_mtx  zt_lk;
 static nni_list zt_nodes;
 
 static void zt_ep_send_conn_req(zt_ep *);
-static void zt_ep_conn_cb(void *);
+static void zt_ep_conn_req_cb(void *);
 static void zt_ep_doaccept(zt_ep *);
 static int  zt_pipe_init(zt_pipe **, zt_ep *, uint64_t, uint64_t);
 
@@ -634,8 +633,8 @@ static void
 zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 {
 	zt_node *ztn = ep->ze_ztn;
+	nni_aio *aio = ep->ze_creq_aio;
 	zt_pipe *p;
-	nni_aio *aio;
 	int      rv;
 
 	if (ep->ze_mode != NNI_EP_MODE_DIAL) {
@@ -650,6 +649,10 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
+	if (ep->ze_creq_try == 0) {
+		return;
+	}
+
 	printf("RECVED CONNACK!!\n");
 
 	// Do we already have a matching pipe?  If so, we can discard
@@ -659,11 +662,11 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
-	if ((aio = nni_list_first(&ep->ze_aios)) == NULL) {
-		// Unexpected!  This should never happen!
-		return;
-	}
-	nni_aio_list_remove(aio);
+	//	if ((aio = nni_list_first(&ep->ze_aios)) == NULL) {
+	//		// Unexpected!  This should never happen!
+	//		return;
+	//	}
+	//	nni_aio_list_remove(aio);
 
 	if ((rv = zt_pipe_init(&p, ep, raddr, ep->ze_laddr)) != 0) {
 		// We couldn't create the pipe, just drop it.
@@ -673,8 +676,13 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	}
 	NNI_GET16(data + zt_offset_protocol, p->zp_peer);
 
+	// Reset the address of the endpoint, so that the next call to
+	// ep_connect will bind a new one -- we are using this one for the
+	// pipe.
+	ep->ze_laddr = 0;
+
 	printf("GIVING DIALER GOOD PIPE!\n");
-	nni_aio_finish_pipe(aio, p);
+	nni_aio_finish_pipe(ep->ze_creq_aio, p);
 }
 
 static void
@@ -1596,7 +1604,8 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		zt_ep_fini(ep);
 		return (NNG_EADDRINVAL);
 	}
-	if ((rv = nni_aio_init(&ep->ze_creq_aio, zt_ep_conn_cb, ep)) != 0) {
+	rv = nni_aio_init(&ep->ze_creq_aio, zt_ep_conn_req_cb, ep);
+	if (rv != 0) {
 		zt_ep_fini(ep);
 		return (rv);
 	}
@@ -1671,10 +1680,8 @@ zt_ep_close(void *arg)
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
-		if (ep->ze_laddr != 0) {
-			nni_idhash_remove(ztn->zn_ports, ep->ze_laddr);
-			nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
-		}
+		nni_idhash_remove(ztn->zn_ports, ep->ze_laddr & 0xffffff);
+		nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
 	}
 
 	// XXX: clean up the pipe if a dialer
@@ -1825,16 +1832,17 @@ zt_ep_accept(void *arg, nni_aio *aio)
 }
 
 static void
-zt_ep_creq_cancel(nni_aio *aio, int rv)
+zt_ep_conn_req_cancel(nni_aio *aio, int rv)
 {
 	// We don't have much to do here.  The AIO will have been
 	// canceled as a result of the "parent" AIO canceling.
-	zt_ep *ep = aio->a_prov_data;
+	zt_ep *ep       = aio->a_prov_data;
+	ep->ze_creq_try = 0;
 	nni_aio_finish_error(aio, rv);
 }
 
 static void
-zt_ep_conn_cb(void *arg)
+zt_ep_conn_req_cb(void *arg)
 {
 	zt_ep *  ep = arg;
 	zt_pipe *p;
@@ -1850,14 +1858,12 @@ zt_ep_conn_cb(void *arg)
 	case 0:
 		// Already canceled, or already handled?
 		if (((uaio = nni_list_first(&ep->ze_aios)) == NULL) ||
-		    ((p = ep->ze_cpipe) == NULL)) {
+		    ((p = nni_aio_get_pipe(aio)) == NULL)) {
 			nni_mtx_unlock(&zt_lk);
 			return;
 		}
-
+		ep->ze_creq_try = 0;
 		nni_aio_list_remove(uaio);
-		ep->ze_cpipe = NULL;
-
 		nni_aio_finish_pipe(uaio, p);
 		nni_mtx_unlock(&zt_lk);
 		return;
@@ -1868,7 +1874,7 @@ zt_ep_conn_cb(void *arg)
 			ep->ze_creq_try++;
 			nni_aio_set_timeout(
 			    aio, nni_clock() + NZT_CONN_INTERVAL);
-			nni_aio_start(aio, zt_ep_creq_cancel, ep);
+			nni_aio_start(aio, zt_ep_conn_req_cancel, ep);
 			zt_ep_send_conn_req(ep);
 			nni_mtx_unlock(&zt_lk);
 			return;
@@ -1878,18 +1884,12 @@ zt_ep_conn_cb(void *arg)
 	// These are failure modes.  Either we timed out too many times,
 	// or an error occurred.
 
-	// We need to give up.
-	p            = ep->ze_cpipe;
-	ep->ze_cpipe = NULL;
-
+	ep->ze_creq_try = 0;
 	while ((uaio = nni_list_first(&ep->ze_aios)) != NULL) {
 		nni_aio_list_remove(uaio);
 		nni_aio_finish_error(uaio, rv);
 	}
 	nni_mtx_unlock(&zt_lk);
-	if (p != NULL) {
-		zt_pipe_fini(p);
-	}
 }
 
 static void
@@ -1922,7 +1922,8 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		// This can't fail -- the only way the ze_creq_aio gets
 		// terminated would have required us to have also
 		// canceled the user AIO and held the lock.
-		(void) nni_aio_start(ep->ze_creq_aio, zt_ep_creq_cancel, ep);
+		(void) nni_aio_start(
+		    ep->ze_creq_aio, zt_ep_conn_req_cancel, ep);
 
 		// We send out the first connect message; it we are not
 		// yet attached to the network the message will be dropped.

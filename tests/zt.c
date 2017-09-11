@@ -14,6 +14,7 @@
 extern int         nng_zt_register(void);
 extern const char *nng_opt_zt_home;
 extern int         nng_optid_zt_home;
+extern int         nng_optid_zt_node;
 
 // zerotier tests.
 
@@ -46,10 +47,8 @@ TestMain("ZeroTier Transport", {
 
 	atexit(nng_fini);
 
-	Convey("We can register the zero tier transport", {
-		So(nng_zt_register() == 0);
-		printf("nng_zt_register done!\n");
-	});
+	Convey("We can register the zero tier transport",
+	    { So(nng_zt_register() == 0); });
 
 	Convey("We can create a zt listener", {
 		nng_listener l;
@@ -97,7 +96,6 @@ TestMain("ZeroTier Transport", {
 		So(nng_pair_open(&s) == 0);
 		Reset({ nng_close(s); });
 
-		printf("ADDR is %s\n", addr);
 		So(nng_dialer_create(&d, s, addr) == 0);
 
 		Convey("We can lookup zerotier home option id", {
@@ -105,6 +103,69 @@ TestMain("ZeroTier Transport", {
 			So(nng_option_lookup(nng_opt_zt_home) ==
 			    nng_optid_zt_home);
 		});
+
+#if 0
+		Convey("And it can be started...", {
+			mkdir(path2, 0700);
+
+			So(nng_dialer_setopt(d, nng_optid_zt_home, path2,
+			       strlen(path2) + 1) == 0);
+
+			So(nng_dialer_start(d, 0) == NNG_ETIMEDOUT);
+
+			// Sleeping a bit
+			nng_usleep(10000000);
+		});
+#endif
+	});
+
+	Convey("We can create a zt pair (dialer & listener)", {
+		nng_dialer   d;
+		nng_listener l;
+		nng_socket   s1;
+		nng_socket   s2;
+		char         addr1[NNG_MAXADDRLEN];
+		char         addr2[NNG_MAXADDRLEN];
+		int          rv;
+		uint64_t     node;
+
+		port = 9944;
+		// uint64_t   node = 0xb000072fa6ull; // my personal host
+
+		snprintf(addr1, sizeof(addr1), "zt://" NWID ":%u", port);
+
+		//		    addr, sizeof(addr), "zt://" NWID
+		//"/%llx:%u",  node, port);
+
+		So(nng_pair_open(&s1) == 0);
+		So(nng_pair_open(&s2) == 0);
+		Reset({
+			nng_close(s1);
+			nng_close(s2);
+		});
+
+		So(nng_listener_create(&l, s1, addr1) == 0);
+		So(nng_listener_setopt(
+		       l, nng_optid_zt_home, path1, strlen(path1) + 1) == 0);
+
+		So(nng_listener_start(l, 0) == 0);
+		node = 0;
+		So(nng_listener_getopt_usec(l, nng_optid_zt_node, &node) == 0);
+		So(node != 0);
+
+		snprintf(
+		    addr2, sizeof(addr2), "zt://" NWID "/%llx:%u", node, port);
+		So(nng_dialer_create(&d, s2, addr2) == 0);
+		So(nng_dialer_setopt(
+		       d, nng_optid_zt_home, path2, strlen(path2) + 1) == 0);
+		So(nng_dialer_start(d, 0) == 0);
+
+		printf("NODE ID LISTENER IS %llx\n", node);
+
+#if 0
+		printf("ADDR is %s\n", addr);
+		So(nng_dialer_create(&d, s, addr) == 0);
+
 
 		Convey("And it can be started...", {
 			mkdir(path2, 0700);
@@ -117,6 +178,7 @@ TestMain("ZeroTier Transport", {
 			// Sleeping a bit
 			nng_usleep(10000000);
 		});
+#endif
 	});
 
 #if 0

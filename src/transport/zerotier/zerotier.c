@@ -22,6 +22,7 @@ const char *nng_opt_zt_node = "zt:node";
 
 int nng_optid_zt_home = -1;
 int nng_optid_zt_nwid = -1;
+int nng_optid_zt_node = -1;
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -72,7 +73,7 @@ typedef struct zt_node zt_node;
 	    (((uint32_t)((uint8_t)(ptr)[1])) << 8) +  \
 	    (((uint32_t)(uint8_t)(ptr)[2]))
 
-#define ZT_PUT32(ptr, u)                                     \
+#define ZT_PUT24(ptr, u)                                     \
 	do {                                                 \
 		(ptr)[0] = (uint8_t)(((uint32_t)(u)) >> 16); \
 		(ptr)[1] = (uint8_t)(((uint32_t)(u)) >> 8);  \
@@ -578,8 +579,10 @@ zt_send(zt_node *ztn, uint64_t nwid, uint8_t op, uint64_t raddr,
 	NNI_ASSERT(len >= zt_offset_protocol);
 	data[zt_offset_opflags] = op;
 	data[zt_offset_version] = zt_version;
-	NNI_PUT32(data + zt_offset_dst_port, raddr & 0xffffff);
-	NNI_PUT32(data + zt_offset_src_port, laddr & 0xffffff);
+	data[zt_offset_zero1]   = 0;
+	data[zt_offset_zero2]   = 0;
+	ZT_PUT24(data + zt_offset_dst_port, raddr & 0xffffff);
+	ZT_PUT24(data + zt_offset_src_port, laddr & 0xffffff);
 
 	(void) ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now,
 	    nwid, srcmac, dstmac, zt_ethertype, 0, data, len, &now);
@@ -611,6 +614,7 @@ zt_pipe_send_conn_ack(zt_pipe *p)
 {
 	uint8_t data[zt_offset_protocol + sizeof(uint16_t)];
 
+	printf("SENDING CONN ACK!!!\n");
 	NNI_PUT16(data + zt_offset_protocol, p->zp_proto);
 	zt_send(p->zp_ztn, p->zp_nwid, zt_op_conn_ack, p->zp_raddr,
 	    p->zp_laddr, data, sizeof(data));
@@ -646,6 +650,8 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
+	printf("RECVED CONNACK!!\n");
+
 	// Do we already have a matching pipe?  If so, we can discard
 	// the operation.  This should not happen, since we normally,
 	// deregister the endpoint when we create the pipe.
@@ -661,11 +667,13 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 
 	if ((rv = zt_pipe_init(&p, ep, raddr, ep->ze_laddr)) != 0) {
 		// We couldn't create the pipe, just drop it.
+		printf("FINISHING ERROR %d %s\n", rv, nng_strerror(rv));
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
 	NNI_GET16(data + zt_offset_protocol, p->zp_peer);
 
+	printf("GIVING DIALER GOOD PIPE!\n");
 	nni_aio_finish_pipe(aio, p);
 }
 
@@ -690,6 +698,7 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// If we already have created a pipe for this connection
 	// then just reply the conn ack.
 	if ((nni_idhash_find(ztn->zn_peers, raddr, (void **) &p)) == 0) {
+		printf("WE ALREADY HAVE A PIPE!\n");
 		zt_pipe_send_conn_ack(p);
 		return;
 	}
@@ -699,12 +708,14 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// this one.
 	for (i = ep->ze_creq_tail; i != ep->ze_creq_head; i++) {
 		if (ep->ze_creqs[i % zt_listenq].cr_raddr == raddr) {
+			printf("THAT ONE IS PENDING!\n");
 			return;
 		}
 	}
 	// We may already have filled our listenq, in which case we just drop.
 	if ((ep->ze_creq_tail + zt_listenq) == ep->ze_creq_head) {
 		// We have taken as many as we can, so just drop it.
+		printf("LISTENQ FULL\n");
 		return;
 	}
 
@@ -718,6 +729,48 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	ep->ze_creq_head++;
 
 	zt_ep_doaccept(ep);
+}
+
+static void
+zt_ep_recv_error(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
+{
+	nni_aio *aio;
+	int      code;
+
+	// Most of the time we don't care about errors.  The exception here
+	// is that when we have an outstanding CON_REQ, we would like to
+	// process that appropriately.
+
+	if (ep->ze_mode != NNI_EP_MODE_DIAL) {
+		// Drop it.
+		return;
+	}
+
+	if (len < zt_offset_err_msg) {
+		// Malformed error frame.
+		return;
+	}
+
+	code = data[zt_offset_err_code];
+	switch (code) {
+	case zt_err_refused:
+		code = NNG_ECONNREFUSED;
+		break;
+	case zt_err_notconn:
+		code = NNG_ECLOSED;
+		break;
+	case zt_err_wrongsp:
+		code = NNG_EPROTO;
+		break;
+	default:
+		code = NNG_ETRANERR;
+		break;
+	}
+
+	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
+		nni_aio_list_remove(aio);
+		nni_aio_finish_error(aio, code);
+	}
 }
 
 static void
@@ -736,6 +789,12 @@ zt_ep_recv(zt_ep *ep, uint8_t opflags, uint64_t raddr, const uint8_t *data,
 	switch (opflags) {
 	case zt_op_conn_req:
 		zt_ep_recv_conn_req(ep, raddr, data, len);
+		return;
+	case zt_op_conn_ack:
+		zt_ep_recv_conn_ack(ep, raddr, data, len);
+		return;
+	case zt_op_error:
+		zt_ep_recv_error(ep, raddr, data, len);
 		return;
 	default:
 		zt_send_err(ep->ze_ztn, ep->ze_nwid, raddr, ep->ze_laddr,
@@ -1198,6 +1257,8 @@ zt_node_create(zt_node **ztnp, const char *path)
 		return (zt_result(zrv));
 	}
 
+	nni_list_append(&zt_nodes, ztn);
+
 	ztn->zn_self = ZT_Node_address(ztn->zn_znode);
 	printf("MY NODE ADDRESS IS %llx\n", ztn->zn_self);
 
@@ -1221,7 +1282,6 @@ zt_node_create(zt_node **ztnp, const char *path)
 	nni_plat_udp_recv(ztn->zn_udp4, ztn->zn_rcv4_aio);
 	nni_plat_udp_recv(ztn->zn_udp6, ztn->zn_rcv6_aio);
 
-	printf("LOOKING GOOD?\n");
 	*ztnp = ztn;
 	return (0);
 }
@@ -1253,7 +1313,6 @@ done:
 
 	ep->ze_ztn = ztn;
 	nni_list_append(&ztn->zn_eplist, ep);
-	nni_list_append(&zt_nodes, ztn);
 
 	(void) ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
 
@@ -1293,6 +1352,8 @@ zt_tran_init(void)
 	int rv;
 	if (((rv = nni_option_register(nng_opt_zt_home, &nng_optid_zt_home)) !=
 	        0) ||
+	    ((rv = nni_option_register(nng_opt_zt_node, &nng_optid_zt_node)) !=
+	        0) ||
 	    ((rv = nni_option_register(nng_opt_zt_nwid, &nng_optid_zt_nwid)) !=
 	        0)) {
 		return (rv);
@@ -1307,6 +1368,7 @@ zt_tran_fini(void)
 {
 	nng_optid_zt_home = -1;
 	nng_optid_zt_nwid = -1;
+	nng_optid_zt_node = -1;
 	zt_node *ztn;
 
 	nni_mtx_lock(&zt_lk);
@@ -1329,6 +1391,7 @@ zt_tran_fini(void)
 static void
 zt_pipe_close(void *arg)
 {
+	printf("PIPE CLOSE CALLED!\n");
 	// This can start the tear down of the connection.
 	// It should send an asynchronous DISC message to let
 	// the peer know we are shutting down.
@@ -1523,6 +1586,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	ep->ze_maxmtu = ZT_MAX_MTU;
 	ep->ze_phymtu = ZT_MIN_MTU;
 	ep->ze_aio    = NULL;
+	ep->ze_proto  = nni_sock_proto(sock);
 	sz            = sizeof(ep->ze_url);
 
 	nni_aio_list_init(&ep->ze_aios);
@@ -1619,25 +1683,23 @@ zt_ep_close(void *arg)
 }
 
 static int
-zt_ep_bind(void *arg)
+zt_ep_bind_locked(zt_ep *ep)
 {
 	int      rv;
-	zt_ep *  ep = arg;
 	uint64_t port;
 	zt_node *ztn;
 
-	nni_mtx_lock(&zt_lk);
-	if ((rv = zt_node_find(ep)) != 0) {
-		nni_mtx_unlock(&zt_lk);
-		return (rv);
+	// If we haven't already got a ZT node, get one.
+	if ((ztn = ep->ze_ztn) == NULL) {
+		if ((rv = zt_node_find(ep)) != 0) {
+			return (rv);
+		}
+		ztn = ep->ze_ztn;
 	}
-
-	ztn = ep->ze_ztn;
 
 	if (ep->ze_laddr == 0) {
 		// ask for an ephemeral port
 		if ((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) {
-			nni_mtx_unlock(&zt_lk);
 			return (rv);
 		}
 		NNI_ASSERT(port & NZT_EPHEMERAL);
@@ -1647,11 +1709,9 @@ zt_ep_bind(void *arg)
 		port = ep->ze_laddr & 0xffffffu;
 
 		if (nni_idhash_find(ztn->zn_ports, port, &conflict) == 0) {
-			nni_mtx_unlock(&zt_lk);
 			return (NNG_EADDRINUSE);
 		}
 		if ((rv = nni_idhash_insert(ztn->zn_ports, port, ep)) != 0) {
-			nni_mtx_unlock(&zt_lk);
 			return (rv);
 		}
 	}
@@ -1664,12 +1724,23 @@ zt_ep_bind(void *arg)
 
 	if ((rv = nni_idhash_insert(ztn->zn_eps, ep->ze_laddr, ep)) != 0) {
 		nni_idhash_remove(ztn->zn_ports, port);
-		nni_mtx_unlock(&zt_lk);
 		return (rv);
 	}
 
-	nni_mtx_unlock(&zt_lk);
 	return (0);
+}
+
+static int
+zt_ep_bind(void *arg)
+{
+	int    rv;
+	zt_ep *ep = arg;
+
+	nni_mtx_lock(&zt_lk);
+	rv = zt_ep_bind_locked(ep);
+	nni_mtx_unlock(&zt_lk);
+
+	return (rv);
 }
 
 static void
@@ -1734,6 +1805,8 @@ zt_ep_doaccept(zt_ep *ep)
 		}
 		p->zp_peer = creq.cr_proto;
 
+		zt_pipe_send_conn_ack(p);
+		printf("FINISHING WITH A GOOD PIPE!\n");
 		nni_aio_finish_pipe(aio, p);
 	}
 }
@@ -1790,7 +1863,6 @@ zt_ep_conn_cb(void *arg)
 		return;
 
 	case NNG_ETIMEDOUT:
-		printf("***** TIMEOUT #%d\n", ep->ze_creq_try);
 		if (ep->ze_creq_try <= NZT_CONN_ATTEMPTS) {
 			// Timed out, but we can try again.
 			ep->ze_creq_try++;
@@ -1831,15 +1903,16 @@ zt_ep_connect(void *arg, nni_aio *aio)
 	// the pipe, but this allows us to receive the initial ack back from
 	// the server.  (This gives us an ephemeral address to work with.)
 
-	if ((rv = zt_ep_bind(ep)) != 0) {
-		nni_aio_finish_error(aio, rv);
-		return;
-	}
-
 	nni_mtx_lock(&zt_lk);
 
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
 		nni_time now = nni_clock();
+
+		if ((rv = zt_ep_bind_locked(ep)) != 0) {
+			nni_aio_finish_error(aio, rv);
+			nni_mtx_unlock(&zt_lk);
+			return;
+		}
 
 		nni_aio_list_append(&ep->ze_aios, aio);
 
@@ -1897,6 +1970,10 @@ zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 	} else if (opt == nng_optid_zt_home) {
 		nni_mtx_lock(&zt_lk);
 		rv = nni_getopt_str(ep->ze_home, data, sizep);
+		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_node) {
+		nni_mtx_lock(&zt_lk);
+		rv = nni_getopt_u64(ep->ze_ztn->zn_self, data, sizep);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_nwid) {
 		nni_mtx_lock(&zt_lk);

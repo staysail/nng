@@ -63,9 +63,11 @@ int nng_optid_zt_node = -1;
 // with the MAC address (from which the ZT node number can be derived,
 // given the network ID.)
 
-typedef struct zt_pipe zt_pipe;
-typedef struct zt_ep   zt_ep;
-typedef struct zt_node zt_node;
+typedef struct zt_pipe     zt_pipe;
+typedef struct zt_ep       zt_ep;
+typedef struct zt_node     zt_node;
+typedef struct zt_frag     zt_frag;
+typedef struct zt_fraglist zt_fraglist;
 
 // Port numbers are stored as 24-bit values in network byte order.
 #define ZT_GET24(ptr, v)                              \
@@ -86,6 +88,7 @@ static const uint32_t zt_ephemeral = 0x800000u; // start of ephemeral ports
 static const uint32_t zt_max_port  = 0xffffffu; // largest port
 static const uint32_t zt_port_mask = 0xffffffu; // mask of valid ports
 
+// These are compile time tunables for now.
 enum zt_tunables {
 	zt_listenq       = 128,              // backlog queue length
 	zt_listen_expire = 60000000,         // maximum time in backlog
@@ -93,6 +96,7 @@ enum zt_tunables {
 	zt_conn_attempts = 12,               // connection attempts (default)
 	zt_conn_interval = 5000000,          // between attempts (usec)
 	zt_udp_sendq     = 16,               // outgoing UDP queue length
+	zt_recvq         = 2,                // max pending recv (per pipe)
 };
 
 enum zt_op_codes {
@@ -121,8 +125,9 @@ enum zt_offsets {
 	zt_offset_err_code   = 10, // error code (1 byte)
 	zt_offset_err_msg    = 11, // error message (string)
 	zt_offset_data_id    = 10, // message ID (2 bytes)
-	zt_offset_data_frlen = 12, // fraagment length (2 bytes)
+	zt_offset_data_frlen = 12, // fragment length (2 bytes)
 	zt_offset_data_froff = 14, // fragment offset (4 bytes)
+	zt_offset_data_data  = 18, // fragment data start (variable)
 	NZT_OFFS_PAYLOAD     = 10, // other payload
 
 };
@@ -168,6 +173,20 @@ struct zt_node {
 	nni_cv        zn_snd6_cv;
 };
 
+// Receive fragment.  Some of the relevant fields are
+// duplicated.
+struct zt_frag {
+	nni_list_node f_link;
+	size_t        f_offset;
+	char *        f_data;
+};
+
+struct zt_fraglist {
+	uint64_t fl_msgid; // message id
+	nni_time fl_time;  // time first frag was received
+	nni_list fl_frags; // list of fragments
+};
+
 struct zt_pipe {
 	nni_list_node zp_link;
 	const char *  zp_addr;
@@ -178,11 +197,11 @@ struct zt_pipe {
 	uint16_t      zp_peer;
 	uint16_t      zp_proto;
 	size_t        zp_rcvmax;
+	size_t        zp_mtu;
 	nni_aio *     zp_user_txaio;
 	nni_aio *     zp_user_rxaio;
-	nni_aio *     zp_start_aio;
-
-	// XXX: fraglist
+	uint16_t      zp_next_msgid;
+	zt_fraglist   zp_recvq[zt_recvq];
 
 	nni_aio *zp_txaio;
 	nni_aio *zp_rxaio;
@@ -1441,11 +1460,13 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
 		return (NNG_ENOMEM);
 	}
-	p->zp_ztn   = ztn;
-	p->zp_raddr = raddr;
-	p->zp_proto = ep->ze_proto;
-	p->zp_nwid  = ep->ze_nwid;
-	p->zp_raddr = raddr;
+	p->zp_ztn        = ztn;
+	p->zp_raddr      = raddr;
+	p->zp_proto      = ep->ze_proto;
+	p->zp_nwid       = ep->ze_nwid;
+	p->zp_raddr      = raddr;
+	p->zp_mtu        = ep->ze_phymtu;
+	p->zp_next_msgid = nni_random() & 0xffff;
 
 	if (laddr == 0) {
 		// Locate a suitable port number.
@@ -1482,15 +1503,49 @@ zt_pipe_send(void *arg, nni_aio *aio)
 {
 	// As we are sending UDP, and there is no callback to worry about,
 	// we just go ahead and send out a stream of messages synchronously.
-	int    i;
-	size_t nbytes = 0;
+	zt_pipe *p   = arg;
+	size_t   mtu = p->zp_mtu;
+	size_t   offset;
+	size_t   len;
+	int      niov;
+	uint8_t  data[ZT_MAX_MTU];
+	uint16_t id;
 
-	for (i = 0; i < aio->a_niov; i++) {
-		nbytes += aio->a_iov[i].iov_len;
+	nni_mtx_lock(&zt_lk);
+	if (nni_aio_start(aio, NULL, p) != 0) {
+		nni_mtx_unlock(&zt_lk);
+		return;
 	}
-	// if (nbytes > max);
 
-	nni_aio_finish(aio, NNG_ENOTSUP, 0);
+	id     = p->zp_next_msgid++;
+	offset = 0;
+	while (aio->a_niov != 0) {
+		// We send in chunks.  Each chunk is at most the optimimum
+		// physical MTU minus the room we need for the headers.
+		len = mtu - zt_offset_data_data;
+		if (aio->a_iov[0].iov_len > len) {
+			memcpy(data + zt_offset_data_data,
+			    aio->a_iov[0].iov_buf, len);
+			aio->a_iov[0].iov_buf += len;
+		} else {
+			len = aio->a_iov[0].iov_len;
+			memcpy(data + zt_offset_data_data,
+			    aio->a_iov[0].iov_buf, len);
+			aio->a_niov--;
+			for (int i = 0; i < aio->a_niov; i++) {
+				aio->a_iov[i] = aio->a_iov[i + 1];
+			}
+		}
+		NNI_PUT32(data + zt_offset_data_id, id);
+		NNI_PUT16(data + zt_offset_data_frlen, len);
+		NNI_PUT32(data + zt_offset_data_froff, offset);
+		offset += len;
+		zt_send(p->zp_ztn, p->zp_nwid,
+		    aio->a_niov ? zt_op_data_mf : zt_op_data, p->zp_raddr,
+		    p->zp_laddr, data, len);
+	}
+	nni_aio_finish(aio, 0, offset);
+	nni_mtx_unlock(&zt_lk);
 }
 
 static void

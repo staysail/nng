@@ -82,10 +82,17 @@ typedef struct zt_node zt_node;
 
 static const uint16_t zt_ethertype = 0x901;
 static const uint8_t  zt_version   = 0x01;
+static const uint32_t zt_ephemeral = 0x800000u; // start of ephemeral ports
+static const uint32_t zt_max_port  = 0xffffffu; // largest port
+static const uint32_t zt_port_mask = 0xffffffu; // mask of valid ports
 
 enum zt_tunables {
-	zt_listenq       = 128,      // backlog queue length
-	zt_listen_expire = 60000000, // maximum time in backlog
+	zt_listenq       = 128,              // backlog queue length
+	zt_listen_expire = 60000000,         // maximum time in backlog
+	zt_rcv_bufsize   = ZT_MAX_MTU + 128, // max UDP recv
+	zt_conn_attempts = 12,               // connection attempts (default)
+	zt_conn_interval = 5000000,          // between attempts (usec)
+	zt_udp_sendq     = 16,               // outgoing UDP queue length
 };
 
 enum zt_op_codes {
@@ -128,51 +135,6 @@ enum zt_errors {
 	zt_err_msgsize = 0x05, // Message to large
 	zt_err_unknown = 0x06, // Other errors
 };
-
-// Ephemeral ports are those with the high order bit set.  There are
-// about 8 million ephemeral ports, and about 8 million static ports.
-// We restrict ourselves to just 24 bit port numbers.  This lets us
-// construct 64-bit conversation IDs by combining the 24-bit port
-// number with the 40-bit node address.  This means that 64-bits can
-// be used to uniquely identify any address.
-#define NZT_EPHEMERAL (1U << 23)
-#define NZT_MAX_PORT ((1U << 24) - 1)
-
-// We queue UDP for transmit asynchronously.  In order to avoid consuming
-// all RAM, we limit the UDP queue len to this many frames.   (Note that
-// this queue should pretty well always be empty.)
-#define NZT_UDP_MAXQ 16
-
-// Connection timeout maximum.  Basically we expect that a remote host
-// will respond within this many usecs to a connection request.  Note
-// that on Linux TCP connection timeouts are about 20s, and on other systems
-// they are about 72s.  This seems rather ridiculously long.  Modern
-// Internet latencies generally never exceed 500ms, and processes should
-// not be MIA for more than a few hundred ms as well.  Having said that, it
-// can take a number of seconds for ZT topology to settle out.
-
-// Connection retry and timeouts.  We send a connection attempt up to
-// 12 times, before giving up and reporting to the user.  Each attempt
-// is separated from the previous by five seconds.  We need long timeouts
-// because it can take time for ZT to stabilize.  This gives us 60 seconds
-// to get a good connection.
-#define NZT_CONN_ATTEMPTS (12)
-#define NZT_CONN_INTERVAL (5000000)
-
-// It can take a while to establish the network connection.  This is because
-// ZT is doing crypto operations, and discovery of network topology (both
-// physical and virtual).  We assume this should complete within half a
-// minute or so though.
-#define NZT_JOIN_MAXTIME (30000000)
-
-// In theory UDP can send/recv 655507, but ZeroTier won't do more
-// than the ZT_MAX_MTU for it's virtual networks  So we need to add some
-// extra space for ZT overhead, which is currently 52 bytes, but we want
-// to leave room for future growth; 128 bytes seems sufficient.  The vast
-// majority of frames will be far far smaller -- typically Ethernet MTUs
-// are 1500 bytes.
-#define NZT_MAX_HEADROOM 128
-#define NZT_RCV_BUFSZ (ZT_MAX_MTU + NZT_MAX_HEADROOM)
 
 // This node structure is wrapped around the ZT_node; this allows us to
 // have multiple endpoints referencing the same ZT_node, but also to
@@ -234,9 +196,6 @@ struct zt_creq {
 	uint64_t cr_raddr;
 	uint16_t cr_proto;
 };
-
-#define NZT_LISTENQ 128
-#define NZT_LISTEN_EXPIRE 60000000 // maximum time in backlog
 
 struct zt_ep {
 	nni_list_node ze_link;
@@ -579,8 +538,8 @@ zt_send(zt_node *ztn, uint64_t nwid, uint8_t op, uint64_t raddr,
 	data[zt_offset_version] = zt_version;
 	data[zt_offset_zero1]   = 0;
 	data[zt_offset_zero2]   = 0;
-	ZT_PUT24(data + zt_offset_dst_port, raddr & 0xffffff);
-	ZT_PUT24(data + zt_offset_src_port, laddr & 0xffffff);
+	ZT_PUT24(data + zt_offset_dst_port, raddr & zt_port_mask);
+	ZT_PUT24(data + zt_offset_src_port, laddr & zt_port_mask);
 
 	(void) ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now,
 	    nwid, srcmac, dstmac, zt_ethertype, 0, data, len, &now);
@@ -602,6 +561,15 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t raddr, uint64_t laddr,
 
 	zt_send(ztn, nwid, zt_op_error, raddr, laddr, data,
 	    strlen(msg) + zt_offset_err_msg);
+}
+
+static void
+zt_pipe_send_discon(zt_pipe *p)
+{
+	uint8_t data[zt_offset_protocol];
+
+	zt_send(p->zp_ztn, p->zp_nwid, zt_op_disc_req, p->zp_raddr,
+	    p->zp_laddr, data, sizeof(data));
 }
 
 static void
@@ -1211,10 +1179,10 @@ zt_node_destroy(zt_node *ztn)
 	}
 
 	if (ztn->zn_rcv4_buf != NULL) {
-		nni_free(ztn->zn_rcv4_buf, NZT_RCV_BUFSZ);
+		nni_free(ztn->zn_rcv4_buf, zt_rcv_bufsize);
 	}
 	if (ztn->zn_rcv6_buf != NULL) {
-		nni_free(ztn->zn_rcv6_buf, NZT_RCV_BUFSZ);
+		nni_free(ztn->zn_rcv6_buf, zt_rcv_bufsize);
 	}
 	nni_aio_fini(ztn->zn_rcv4_aio);
 	nni_aio_fini(ztn->zn_rcv6_aio);
@@ -1255,8 +1223,8 @@ zt_node_create(zt_node **ztnp, const char *path)
 	nni_aio_init(&ztn->zn_rcv4_aio, zt_node_rcv4_cb, ztn);
 	nni_aio_init(&ztn->zn_rcv6_aio, zt_node_rcv6_cb, ztn);
 
-	if (((ztn->zn_rcv4_buf = nni_alloc(NZT_RCV_BUFSZ)) == NULL) ||
-	    ((ztn->zn_rcv6_buf = nni_alloc(NZT_RCV_BUFSZ)) == NULL)) {
+	if (((ztn->zn_rcv4_buf = nni_alloc(zt_rcv_bufsize)) == NULL) ||
+	    ((ztn->zn_rcv6_buf = nni_alloc(zt_rcv_bufsize)) == NULL)) {
 		zt_node_destroy(ztn);
 		return (NNG_ENOMEM);
 	}
@@ -1276,8 +1244,8 @@ zt_node_create(zt_node **ztnp, const char *path)
 	// higher than the max port, and starting with an
 	// initial random value.  Note that this should give us
 	// about 8 million possible ephemeral ports.
-	nni_idhash_set_limits(ztn->zn_ports, NZT_EPHEMERAL, NZT_MAX_PORT,
-	    (nni_random() % (NZT_MAX_PORT - NZT_EPHEMERAL)) + NZT_EPHEMERAL);
+	nni_idhash_set_limits(ztn->zn_ports, zt_ephemeral, zt_max_port,
+	    (nni_random() % (zt_max_port - zt_ephemeral)) + zt_ephemeral);
 
 	nni_strlcpy(ztn->zn_path, path, sizeof(ztn->zn_path));
 	zrv = ZT_Node_new(&ztn->zn_znode, ztn, NULL, &zt_callbacks, zt_now());
@@ -1298,12 +1266,12 @@ zt_node_create(zt_node **ztnp, const char *path)
 	// Schedule receive
 	ztn->zn_rcv4_aio->a_niov           = 1;
 	ztn->zn_rcv4_aio->a_iov[0].iov_buf = ztn->zn_rcv4_buf;
-	ztn->zn_rcv4_aio->a_iov[0].iov_len = NZT_RCV_BUFSZ;
+	ztn->zn_rcv4_aio->a_iov[0].iov_len = zt_rcv_bufsize;
 	ztn->zn_rcv4_aio->a_addr           = &ztn->zn_rcv4_addr;
 	ztn->zn_rcv4_aio->a_count          = 0;
 	ztn->zn_rcv6_aio->a_niov           = 1;
 	ztn->zn_rcv6_aio->a_iov[0].iov_buf = ztn->zn_rcv6_buf;
-	ztn->zn_rcv6_aio->a_iov[0].iov_len = NZT_RCV_BUFSZ;
+	ztn->zn_rcv6_aio->a_iov[0].iov_len = zt_rcv_bufsize;
 	ztn->zn_rcv6_aio->a_addr           = &ztn->zn_rcv6_addr;
 	ztn->zn_rcv6_aio->a_count          = 0;
 
@@ -1425,10 +1393,12 @@ zt_tran_fini(void)
 static void
 zt_pipe_close(void *arg)
 {
+	zt_pipe *p = arg;
+
 	printf("PIPE CLOSE CALLED!\n");
-	// This can start the tear down of the connection.
-	// It should send an asynchronous DISC message to let
-	// the peer know we are shutting down.
+	nni_aio_cancel(p->zp_rxaio, NNG_ECLOSED);
+	nni_aio_cancel(p->zp_txaio, NNG_ECLOSED);
+	zt_pipe_send_discon(p);
 }
 
 static void
@@ -1442,7 +1412,7 @@ zt_pipe_fini(void *arg)
 
 	// This tosses the connection details and all state.
 	nni_mtx_lock(&zt_lk);
-	nni_idhash_remove(ztn->zn_ports, p->zp_laddr & 0xffffff);
+	nni_idhash_remove(ztn->zn_ports, p->zp_laddr & zt_port_mask);
 	nni_idhash_remove(ztn->zn_pipes, p->zp_laddr);
 	nni_idhash_remove(ztn->zn_peers, p->zp_raddr);
 	nni_mtx_unlock(&zt_lk);
@@ -1510,6 +1480,16 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 static void
 zt_pipe_send(void *arg, nni_aio *aio)
 {
+	// As we are sending UDP, and there is no callback to worry about,
+	// we just go ahead and send out a stream of messages synchronously.
+	int    i;
+	size_t nbytes = 0;
+
+	for (i = 0; i < aio->a_niov; i++) {
+		nbytes += aio->a_iov[i].iov_len;
+	}
+	// if (nbytes > max);
+
 	nni_aio_finish(aio, NNG_ENOTSUP, 0);
 }
 
@@ -1650,7 +1630,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		    (zt_parsehex(&u, &node) != 0) ||
 		    (node > 0xffffffffffull) || (*u++ != ':') ||
 		    (zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
-		    (port > NZT_MAX_PORT) || (port == 0)) {
+		    (port > zt_max_port) || (port == 0)) {
 			return (NNG_EADDRINVAL);
 		}
 		ep->ze_raddr = node;
@@ -1665,7 +1645,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// port.
 		if ((zt_parsehex(&u, &nwid) != 0) || (*u++ != ':') ||
 		    (zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
-		    (port > NZT_MAX_PORT)) {
+		    (port > zt_max_port)) {
 			return (NNG_EADDRINVAL);
 		}
 		ep->ze_laddr |= port;
@@ -1716,7 +1696,7 @@ zt_ep_close(void *arg)
 	// If we're on the ztn node list, pull us off.
 	if (ztn != NULL) {
 		nni_list_node_remove(&ep->ze_link);
-		nni_idhash_remove(ztn->zn_ports, ep->ze_laddr & 0xffffff);
+		nni_idhash_remove(ztn->zn_ports, ep->ze_laddr & zt_port_mask);
 		nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
 	}
 
@@ -1745,11 +1725,11 @@ zt_ep_bind_locked(zt_ep *ep)
 		if ((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) {
 			return (rv);
 		}
-		NNI_ASSERT(port & NZT_EPHEMERAL);
+		NNI_ASSERT(port & zt_ephemeral);
 	} else {
 		void *conflict;
 		// make sure port requested is free.
-		port = ep->ze_laddr & 0xffffffu;
+		port = ep->ze_laddr & zt_port_mask;
 
 		if (nni_idhash_find(ztn->zn_ports, port, &conflict) == 0) {
 			return (NNG_EADDRINUSE);
@@ -1758,7 +1738,7 @@ zt_ep_bind_locked(zt_ep *ep)
 			return (rv);
 		}
 	}
-	NNI_ASSERT(port <= 0xffffffu);
+	NNI_ASSERT(port <= zt_max_port);
 	NNI_ASSERT(port > 0);
 
 	ep->ze_laddr = ztn->zn_self;
@@ -1905,11 +1885,11 @@ zt_ep_conn_req_cb(void *arg)
 		return;
 
 	case NNG_ETIMEDOUT:
-		if (ep->ze_creq_try <= NZT_CONN_ATTEMPTS) {
+		if (ep->ze_creq_try <= zt_conn_attempts) {
 			// Timed out, but we can try again.
 			ep->ze_creq_try++;
 			nni_aio_set_timeout(
-			    aio, nni_clock() + NZT_CONN_INTERVAL);
+			    aio, nni_clock() + zt_conn_interval);
 			nni_aio_start(aio, zt_ep_conn_req_cancel, ep);
 			zt_ep_send_conn_req(ep);
 			nni_mtx_unlock(&zt_lk);
@@ -1954,7 +1934,7 @@ zt_ep_connect(void *arg, nni_aio *aio)
 
 		ep->ze_creq_try = 1;
 
-		nni_aio_set_timeout(ep->ze_creq_aio, now + NZT_CONN_INTERVAL);
+		nni_aio_set_timeout(ep->ze_creq_aio, now + zt_conn_interval);
 		// This can't fail -- the only way the ze_creq_aio gets
 		// terminated would have required us to have also
 		// canceled the user AIO and held the lock.

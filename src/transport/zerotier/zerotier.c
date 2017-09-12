@@ -589,7 +589,7 @@ zt_send(zt_node *ztn, uint64_t nwid, uint8_t op, uint64_t raddr,
 }
 
 static void
-zt_send_err(zt_node *ztn, uint64_t nwid, uint32_t raddr, uint64_t laddr,
+zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t raddr, uint64_t laddr,
     uint8_t err, const char *msg)
 {
 	uint8_t data[128];
@@ -602,9 +602,6 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint32_t raddr, uint64_t laddr,
 
 	zt_send(ztn, nwid, zt_op_error, raddr, laddr, data,
 	    strlen(msg) + zt_offset_err_msg);
-
-	data[zt_offset_opflags] = zt_op_error;
-	data[zt_offset_version] = zt_version;
 }
 
 static void
@@ -764,9 +761,9 @@ zt_ep_recv_error(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		break;
 	}
 
-	while ((aio = nni_list_first(&ep->ze_aios)) != NULL) {
-		nni_aio_list_remove(aio);
-		nni_aio_finish_error(aio, code);
+	if (ep->ze_creq_try > 0) {
+		ep->ze_creq_try = 0;
+		nni_aio_finish_error(ep->ze_creq_aio, code);
 	}
 }
 

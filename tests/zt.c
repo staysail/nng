@@ -119,6 +119,37 @@ TestMain("ZeroTier Transport", {
 #endif
 	});
 
+	Convey("We can create an ephemeral listener", {
+		nng_dialer   d;
+		nng_listener l;
+		nng_socket   s;
+		char         addr[NNG_MAXADDRLEN];
+		int          rv;
+		uint64_t     node1 = 0;
+		uint64_t     node2 = 0;
+
+		snprintf(addr, sizeof(addr), "zt://" NWID ":%u", port);
+
+		So(nng_pair_open(&s) == 0);
+		Reset({ nng_close(s); });
+
+		So(nng_listener_create(&l, s, addr) == 0);
+
+		So(nng_listener_getopt_usec(l, nng_optid_zt_node, &node1) ==
+		    0);
+		So(node1 != 0);
+
+		Convey("Connection refused works", {
+			snprintf(addr, sizeof(addr), "zt://" NWID "/%llx:%u",
+			    node1, 42);
+			So(nng_dialer_create(&d, s, addr) == 0);
+			So(nng_dialer_getopt_usec(
+			       d, nng_optid_zt_node, &node2) == 0);
+			So(node2 == node1);
+			So(nng_dialer_start(d, 0) == NNG_ECONNREFUSED);
+		});
+	});
+
 	Convey("We can create a zt pair (dialer & listener)", {
 		nng_dialer   d;
 		nng_listener l;

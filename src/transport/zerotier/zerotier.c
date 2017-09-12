@@ -384,7 +384,7 @@ zt_node_rcv4_cb(void *arg)
 	zt_node_resched(ztn, now);
 
 	// Schedule another receive.
-	if ((!ztn->zn_closed) && (ztn->zn_udp4 != NULL)) {
+	if (ztn->zn_udp4 != NULL) {
 		aio->a_count = 0;
 		nni_plat_udp_recv(ztn->zn_udp4, aio);
 	}
@@ -438,7 +438,7 @@ zt_node_rcv6_cb(void *arg)
 	zt_node_resched(ztn, now);
 
 	// Schedule another receive.
-	if ((!ztn->zn_closed) && (ztn->zn_udp6 != NULL)) {
+	if (ztn->zn_udp6 != NULL) {
 		aio->a_count = 0;
 		nni_plat_udp_recv(ztn->zn_udp6, aio);
 	}
@@ -545,7 +545,6 @@ zt_virtual_config(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 
 			if ((ep->ze_mode == NNI_EP_MODE_DIAL) &&
 			    (nni_list_first(&ep->ze_aios) != NULL)) {
-				printf("SENDING A CREQ because we are up!\n");
 				zt_ep_send_conn_req(ep);
 			}
 			// if (ep->ze_mode == NNI_EP
@@ -613,7 +612,6 @@ zt_pipe_send_conn_ack(zt_pipe *p)
 {
 	uint8_t data[zt_offset_protocol + sizeof(uint16_t)];
 
-	printf("SENDING CONN ACK!!!\n");
 	NNI_PUT16(data + zt_offset_protocol, p->zp_proto);
 	zt_send(p->zp_ztn, p->zp_nwid, zt_op_conn_ack, p->zp_raddr,
 	    p->zp_laddr, data, sizeof(data));
@@ -653,8 +651,6 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
-	printf("RECVED CONNACK!!\n");
-
 	// Do we already have a matching pipe?  If so, we can discard
 	// the operation.  This should not happen, since we normally,
 	// deregister the endpoint when we create the pipe.
@@ -662,15 +658,8 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
-	//	if ((aio = nni_list_first(&ep->ze_aios)) == NULL) {
-	//		// Unexpected!  This should never happen!
-	//		return;
-	//	}
-	//	nni_aio_list_remove(aio);
-
 	if ((rv = zt_pipe_init(&p, ep, raddr, ep->ze_laddr)) != 0) {
 		// We couldn't create the pipe, just drop it.
-		printf("FINISHING ERROR %d %s\n", rv, nng_strerror(rv));
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
@@ -956,6 +945,11 @@ static const char *zt_files[] = {
 #define pathsep "/"
 #endif
 
+static struct {
+	size_t len;
+	void * data;
+} zt_ephemeral_state[ZT_STATE_OBJECT_NETWORK_CONFIG];
+
 static void
 zt_state_put(ZT_Node *node, void *userptr, void *thr,
     enum ZT_StateObjectType objtype, const uint64_t objid[2], const void *data,
@@ -971,6 +965,23 @@ zt_state_put(ZT_Node *node, void *userptr, void *thr,
 
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
+		return;
+	}
+
+	// If we have no valid path, then we just use ephemeral data.
+	if (strlen(ztn->zn_path) == 0) {
+		void * ndata = NULL;
+		void * odata = zt_ephemeral_state[objtype].data;
+		size_t olen  = zt_ephemeral_state[objtype].len;
+		if ((len >= 0) && ((ndata = nni_alloc(len)) != NULL)) {
+			memcpy(ndata, data, len);
+		}
+		zt_ephemeral_state[objtype].data = ndata;
+		zt_ephemeral_state[objtype].len  = len;
+
+		if (olen > 0) {
+			nni_free(odata, olen);
+		}
 		return;
 	}
 
@@ -1022,6 +1033,19 @@ zt_state_get(ZT_Node *node, void *userptr, void *thr,
 	if ((objtype > ZT_STATE_OBJECT_NETWORK_CONFIG) ||
 	    ((fname = zt_files[(int) objtype]) == NULL)) {
 		return (-1);
+	}
+
+	// If no base directory, we are using ephemeral data.
+	if (strlen(ztn->zn_path) == 0) {
+		if (zt_ephemeral_state[objtype].data == NULL) {
+			return (-1);
+		}
+		if (zt_ephemeral_state[objtype].len > len) {
+			return (-1);
+		}
+		len = zt_ephemeral_state[objtype].len;
+		memcpy(data, zt_ephemeral_state[objtype].data, len);
+		return (len);
 	}
 
 	sz = sizeof(path);
@@ -1258,7 +1282,7 @@ zt_node_create(zt_node **ztnp, const char *path)
 	nni_idhash_set_limits(ztn->zn_ports, NZT_EPHEMERAL, NZT_MAX_PORT,
 	    (nni_random() % (NZT_MAX_PORT - NZT_EPHEMERAL)) + NZT_EPHEMERAL);
 
-	(void) snprintf(ztn->zn_path, sizeof(ztn->zn_path), "%s", path);
+	nni_strlcpy(ztn->zn_path, path, sizeof(ztn->zn_path));
 	zrv = ZT_Node_new(&ztn->zn_znode, ztn, NULL, &zt_callbacks, zt_now());
 	if (zrv != ZT_RESULT_OK) {
 		zt_node_destroy(ztn);
@@ -1268,7 +1292,6 @@ zt_node_create(zt_node **ztnp, const char *path)
 	nni_list_append(&zt_nodes, ztn);
 
 	ztn->zn_self = ZT_Node_address(ztn->zn_znode);
-	printf("MY NODE ADDRESS IS %llx\n", ztn->zn_self);
 
 	nni_thr_run(&ztn->zn_bgthr);
 
@@ -1306,9 +1329,6 @@ zt_node_find(zt_ep *ep)
 		if (strcmp(ep->ze_home, ztn->zn_path) == 0) {
 			goto done;
 		}
-		if (ztn->zn_closed) {
-			return (NNG_ECLOSED);
-		}
 	}
 
 	// We didn't find a node, so make one.  And try to
@@ -1320,6 +1340,9 @@ zt_node_find(zt_ep *ep)
 done:
 
 	ep->ze_ztn = ztn;
+	if (nni_list_node_active(&ep->ze_link)) {
+		nni_list_node_remove(&ep->ze_link);
+	}
 	nni_list_append(&ztn->zn_eplist, ep);
 
 	(void) ZT_Node_join(ztn->zn_znode, ep->ze_nwid, ztn, NULL);
@@ -1392,6 +1415,12 @@ zt_tran_fini(void)
 	}
 	nni_mtx_unlock(&zt_lk);
 
+	for (int i = 0; i < ZT_STATE_OBJECT_NETWORK_CONFIG; i++) {
+		if (zt_ephemeral_state[i].len > 0) {
+			nni_free(zt_ephemeral_state[i].data,
+			    zt_ephemeral_state[i].len);
+		}
+	}
 	NNI_ASSERT(nni_list_empty(&zt_nodes));
 	nni_mtx_fini(&zt_lk);
 }
@@ -1584,6 +1613,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	if ((ep = NNI_ALLOC_STRUCT(ep)) == NULL) {
 		return (NNG_ENOMEM);
 	}
+
 	// URL parsing...
 	// URL is form zt://<nwid>[/<remoteaddr>]:<port>
 	// The <remoteaddr> part is required for remote
@@ -1610,8 +1640,7 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		return (rv);
 	}
 
-	*epp = ep;
-	u    = url + strlen("zt://");
+	u = url + strlen("zt://");
 	// Parse the URL.
 
 	switch (mode) {
@@ -1652,6 +1681,16 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 
 	ep->ze_nwid = nwid;
 
+	nni_mtx_lock(&zt_lk);
+	rv = zt_node_find(ep);
+	nni_mtx_unlock(&zt_lk);
+
+	if (rv != 0) {
+		zt_ep_fini(ep);
+		return (rv);
+	}
+
+	*epp = ep;
 	return (0);
 }
 
@@ -1951,7 +1990,11 @@ zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 			return (NNG_EINVAL);
 		}
 		nni_mtx_lock(&zt_lk);
-		(void) snprintf(ep->ze_home, sizeof(ep->ze_home), "%s", data);
+		nni_strlcpy(ep->ze_home, data, sizeof(ep->ze_home));
+		rv = zt_node_find(ep);
+		if (rv != 0) {
+			ep->ze_ztn = NULL;
+		}
 		nni_mtx_unlock(&zt_lk);
 		rv = 0;
 	}

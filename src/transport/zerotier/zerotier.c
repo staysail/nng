@@ -208,7 +208,7 @@ struct zt_pipe {
 	uint16_t      zp_proto;
 	size_t        zp_rcvmax;
 	size_t        zp_mtu;
-	nni_aio *     zp_user_txaio;
+	int           zp_closed;
 	nni_aio *     zp_user_rxaio;
 	uint16_t      zp_next_msgid;
 	zt_fraglist   zp_recvq[zt_recvq];
@@ -593,7 +593,7 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t raddr, uint64_t laddr,
 }
 
 static void
-zt_pipe_send_discon(zt_pipe *p)
+zt_pipe_send_disc_req(zt_pipe *p)
 {
 	uint8_t data[zt_size_disc_req];
 
@@ -662,6 +662,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// Reset the address of the endpoint, so that the next call to
 	// ep_connect will bind a new one -- we are using this one for the
 	// pipe.
+	nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
 	ep->ze_laddr = 0;
 
 	printf("GIVING DIALER GOOD PIPE!\n");
@@ -765,8 +766,8 @@ zt_ep_recv_error(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 }
 
 static void
-zt_ep_recv(zt_ep *ep, uint8_t opflags, uint64_t raddr, const uint8_t *data,
-    size_t len)
+zt_ep_virtual_recv(zt_ep *ep, uint8_t opflags, uint64_t raddr,
+    const uint8_t *data, size_t len)
 {
 	zt_node *ztn   = ep->ze_ztn;
 	uint64_t laddr = ep->ze_laddr;
@@ -790,6 +791,36 @@ zt_ep_recv(zt_ep *ep, uint8_t opflags, uint64_t raddr, const uint8_t *data,
 	default:
 		zt_send_err(ep->ze_ztn, ep->ze_nwid, raddr, ep->ze_laddr,
 		    zt_err_proto, "Bad operation");
+		return;
+	}
+}
+
+static void
+zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
+{
+	nni_aio *aio;
+	printf("REMOTE DISCONNECT!\n");
+	// NB: lock held already.
+	// We don't bother to check the length... we're going to disconnect
+	// anyway.
+	if ((aio = p->zp_user_rxaio) != NULL) {
+		p->zp_user_rxaio = NULL;
+		p->zp_closed     = 1;
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+	}
+}
+
+// This function is called when we have determined that a frame has
+// arrived for a pipe.  The remote and local addresses were both matched
+// by the caller.
+static void
+zt_pipe_virtual_recv(
+    zt_pipe *p, uint8_t opflags, const uint8_t *data, size_t len)
+{
+	printf("PIPE VIRTUAL RECV!\n");
+	switch (opflags) {
+	case zt_op_disc_req:
+		zt_pipe_recv_disc_req(p, data, len);
 		return;
 	}
 }
@@ -836,17 +867,6 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 
 	// NB: We are holding the zt_lock.
 
-	// First look for a pipe.  This can be an existing client pipe,
-	// or a server pipe.  If the pipe is a client pipe, it may have
-	// the same address as the endpoint.
-
-	if ((nni_idhash_find(ztn->zn_eps, laddr, (void **) &ep) == 0) &&
-	    (ep->ze_nwid == nwid)) {
-		// direct this to an endpoint.
-		zt_ep_recv(ep, opflags, raddr, data, len);
-		return;
-	}
-
 	// Look up a pipe, but also we use this chance to check
 	// that the source address matches what the pipe was
 	// established with.  If the pipe does not match then
@@ -862,7 +882,16 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 			    "Not connected");
 			return;
 		}
-		// zt_pipe_virtual_recv(p, opflags, data, len);
+		zt_pipe_virtual_recv(p, opflags, data, len);
+		return;
+	}
+
+	// No pipe, so look for an endpoint.
+	if ((nni_idhash_find(ztn->zn_eps, laddr, (void **) &ep) == 0) &&
+	    (ep->ze_nwid == nwid)) {
+		// direct this to an endpoint.
+		zt_ep_virtual_recv(ep, opflags, raddr, data, len);
+		return;
 	}
 
 	// We have a request for which we have no listener, and no pipe.
@@ -1426,11 +1455,12 @@ zt_pipe_close(void *arg)
 
 	printf("PIPE CLOSE CALLED!\n");
 	nni_mtx_lock(&zt_lk);
+	p->zp_closed = 1;
 	if ((aio = p->zp_user_rxaio) != NULL) {
 		p->zp_user_rxaio = NULL;
 		nni_aio_finish_error(aio, NNG_ECLOSED);
 	}
-	zt_pipe_send_discon(p);
+	zt_pipe_send_disc_req(p);
 	nni_mtx_unlock(&zt_lk);
 	printf("PIPE CLOSE DONE\n");
 }
@@ -1533,6 +1563,12 @@ zt_pipe_send(void *arg, nni_aio *aio)
 
 	nni_mtx_lock(&zt_lk);
 	if (nni_aio_start(aio, NULL, p) != 0) {
+		nni_mtx_unlock(&zt_lk);
+		return;
+	}
+
+	if (p->zp_closed) {
+		nni_aio_finish_error(aio, NNG_ECLOSED);
 		nni_mtx_unlock(&zt_lk);
 		return;
 	}
@@ -1655,8 +1691,12 @@ zt_pipe_recv(void *arg, nni_aio *aio)
 		nni_mtx_unlock(&zt_lk);
 		return;
 	}
-	p->zp_user_rxaio = aio;
-	zt_pipe_dorecv(p);
+	if (p->zp_closed) {
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+	} else {
+		p->zp_user_rxaio = aio;
+		zt_pipe_dorecv(p);
+	}
 	nni_mtx_unlock(&zt_lk);
 }
 

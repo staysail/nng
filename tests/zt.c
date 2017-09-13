@@ -172,6 +172,7 @@ TestMain("ZeroTier Transport", {
 		So(nng_pair_open(&s2) == 0);
 		Reset({
 			nng_close(s1);
+			nng_usleep(1000000);
 			nng_close(s2);
 		});
 
@@ -192,7 +193,6 @@ TestMain("ZeroTier Transport", {
 		So(nng_dialer_start(d, 0) == 0);
 
 		printf("NODE ID LISTENER IS %llx\n", node);
-
 #if 0
 		printf("ADDR is %s\n", addr);
 		So(nng_dialer_create(&d, s, addr) == 0);

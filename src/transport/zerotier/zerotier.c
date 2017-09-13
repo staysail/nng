@@ -97,6 +97,7 @@ enum zt_tunables {
 	zt_conn_interval = 5000000,          // between attempts (usec)
 	zt_udp_sendq     = 16,               // outgoing UDP queue length
 	zt_recvq         = 2,                // max pending recv (per pipe)
+	zt_recv_stale    = 1000000,          // frags older than are stale
 };
 
 enum zt_op_codes {
@@ -130,6 +131,13 @@ enum zt_offsets {
 	zt_offset_data_data  = 18, // fragment data start (variable)
 	NZT_OFFS_PAYLOAD     = 10, // other payload
 
+	zt_size_headers  = 10,
+	zt_size_conn_req = 12,
+	zt_size_conn_ack = 12,
+	zt_size_disc_req = 10,
+	zt_size_ping_req = 10,
+	zt_size_ping_ack = 10,
+	zt_size_data     = 18,
 };
 
 enum zt_errors {
@@ -178,11 +186,13 @@ struct zt_node {
 struct zt_frag {
 	nni_list_node f_link;
 	size_t        f_offset;
+	size_t        f_len;
 	char *        f_data;
 };
 
 struct zt_fraglist {
 	uint64_t fl_msgid; // message id
+	int      fl_ready; // we have all messages
 	nni_time fl_time;  // time first frag was received
 	nni_list fl_frags; // list of fragments
 };
@@ -203,7 +213,6 @@ struct zt_pipe {
 	uint16_t      zp_next_msgid;
 	zt_fraglist   zp_recvq[zt_recvq];
 
-	nni_aio *zp_txaio;
 	nni_aio *zp_rxaio;
 	nni_aio *zp_pngaio;
 	nni_msg *zp_rxmsg;
@@ -273,6 +282,7 @@ static void zt_ep_send_conn_req(zt_ep *);
 static void zt_ep_conn_req_cb(void *);
 static void zt_ep_doaccept(zt_ep *);
 static int  zt_pipe_init(zt_pipe **, zt_ep *, uint64_t, uint64_t);
+static void zt_fraglist_free(zt_fraglist *);
 
 static uint64_t
 zt_now(void)
@@ -585,7 +595,7 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t raddr, uint64_t laddr,
 static void
 zt_pipe_send_discon(zt_pipe *p)
 {
-	uint8_t data[zt_offset_protocol];
+	uint8_t data[zt_size_disc_req];
 
 	zt_send(p->zp_ztn, p->zp_nwid, zt_op_disc_req, p->zp_raddr,
 	    p->zp_laddr, data, sizeof(data));
@@ -594,7 +604,7 @@ zt_pipe_send_discon(zt_pipe *p)
 static void
 zt_pipe_send_conn_ack(zt_pipe *p)
 {
-	uint8_t data[zt_offset_protocol + sizeof(uint16_t)];
+	uint8_t data[zt_size_conn_ack];
 
 	NNI_PUT16(data + zt_offset_protocol, p->zp_proto);
 	zt_send(p->zp_ztn, p->zp_nwid, zt_op_conn_ack, p->zp_raddr,
@@ -604,7 +614,7 @@ zt_pipe_send_conn_ack(zt_pipe *p)
 static void
 zt_ep_send_conn_req(zt_ep *ep)
 {
-	uint8_t data[zt_offset_protocol + sizeof(uint16_t)];
+	uint8_t data[zt_size_conn_req];
 
 	NNI_PUT16(data + zt_offset_protocol, ep->ze_proto);
 	zt_send(ep->ze_ztn, ep->ze_nwid, zt_op_conn_req, ep->ze_raddr,
@@ -625,7 +635,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		return;
 	}
 
-	if (len != (zt_offset_protocol + sizeof(uint16_t))) {
+	if (len != zt_size_conn_ack) {
 		zt_send_err(ztn, ep->ze_nwid, raddr, ep->ze_laddr,
 		    zt_err_proto, "Bad message length");
 		return;
@@ -670,7 +680,7 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		    zt_err_proto, "Inappropriate operation");
 		return;
 	}
-	if (len != (zt_offset_protocol + sizeof(uint16_t))) {
+	if (len != zt_size_conn_req) {
 		zt_send_err(ztn, ep->ze_nwid, raddr, ep->ze_laddr,
 		    zt_err_proto, "Bad message length");
 		return;
@@ -803,7 +813,7 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 	uint64_t       laddr;
 
 	printf("VIRTUAL NET FRAME RECVD\n");
-	if ((ethertype != zt_ethertype) || (len < NZT_OFFS_PAYLOAD) ||
+	if ((ethertype != zt_ethertype) || (len < zt_size_headers) ||
 	    (data[zt_offset_version] != zt_version) ||
 	    (data[zt_offset_zero1] != 0) || (data[zt_offset_zero2] != 0)) {
 
@@ -812,7 +822,6 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 	}
 
 	opflags = data[zt_offset_opflags];
-	//
 
 	ZT_GET24(data + zt_offset_dst_port, lport);
 	ZT_GET24(data + zt_offset_src_port, rport);
@@ -1413,11 +1422,17 @@ static void
 zt_pipe_close(void *arg)
 {
 	zt_pipe *p = arg;
+	nni_aio *aio;
 
 	printf("PIPE CLOSE CALLED!\n");
-	nni_aio_cancel(p->zp_rxaio, NNG_ECLOSED);
-	nni_aio_cancel(p->zp_txaio, NNG_ECLOSED);
+	nni_mtx_lock(&zt_lk);
+	if ((aio = p->zp_user_rxaio) != NULL) {
+		p->zp_user_rxaio = NULL;
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+	}
 	zt_pipe_send_discon(p);
+	nni_mtx_unlock(&zt_lk);
+	printf("PIPE CLOSE DONE\n");
 }
 
 static void
@@ -1427,7 +1442,6 @@ zt_pipe_fini(void *arg)
 	zt_node *ztn = p->zp_ztn;
 
 	nni_aio_stop(p->zp_rxaio);
-	nni_aio_stop(p->zp_txaio);
 
 	// This tosses the connection details and all state.
 	nni_mtx_lock(&zt_lk);
@@ -1436,12 +1450,11 @@ zt_pipe_fini(void *arg)
 	nni_idhash_remove(ztn->zn_peers, p->zp_raddr);
 	nni_mtx_unlock(&zt_lk);
 
-	NNI_FREE_STRUCT(p);
-}
+	for (int i = 0; i < zt_recvq; i++) {
+		zt_fraglist_free(&p->zp_recvq[i]);
+	}
 
-static void
-zt_pipe_send_cb(void *arg)
-{
+	NNI_FREE_STRUCT(p);
 }
 
 static void
@@ -1456,6 +1469,7 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 	uint64_t port = 0;
 	int      rv;
 	zt_node *ztn = ep->ze_ztn;
+	int      i;
 
 	if ((p = NNI_ALLOC_STRUCT(p)) == NULL) {
 		return (NNG_ENOMEM);
@@ -1487,11 +1501,17 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 		p->zp_laddr = laddr;
 	}
 
-	if (((rv = nni_aio_init(&p->zp_txaio, zt_pipe_send_cb, p)) != 0) ||
-	    ((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
+	if (((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
 	    ((rv = nni_idhash_insert(ztn->zn_pipes, p->zp_laddr, p)) != 0) ||
 	    ((rv = nni_idhash_insert(ztn->zn_peers, p->zp_raddr, p)) != 0)) {
 		zt_pipe_fini(p);
+	}
+
+	for (i = 0; i < zt_recvq; i++) {
+		NNI_LIST_INIT(&p->zp_recvq[i].fl_frags, zt_frag, f_link);
+		p->zp_recvq[i].fl_time  = NNI_TIME_ZERO;
+		p->zp_recvq[i].fl_msgid = 0;
+		p->zp_recvq[i].fl_ready = 0;
 	}
 
 	*pipep = p;
@@ -1549,9 +1569,95 @@ zt_pipe_send(void *arg, nni_aio *aio)
 }
 
 static void
+zt_pipe_cancel_recv(nni_aio *aio, int rv)
+{
+	zt_pipe *p = aio->a_prov_data;
+	printf("CANCEL RECV START\n");
+	nni_mtx_lock(&zt_lk);
+	if (p->zp_user_rxaio != aio) {
+		nni_mtx_unlock(&zt_lk);
+		printf("NOT OUR RECV TO CANCEL\n");
+	}
+	p->zp_user_rxaio = NULL;
+	nni_mtx_unlock(&zt_lk);
+	nni_aio_finish_error(aio, rv);
+	printf("CANCEL RECV DONE\n");
+}
+
+static void
+zt_fraglist_free(zt_fraglist *fl)
+{
+	zt_frag *f;
+
+	while ((f = nni_list_first(&fl->fl_frags)) != NULL) {
+		nni_list_remove(&fl->fl_frags, f);
+		nni_free(f->f_data, f->f_len);
+		NNI_FREE_STRUCT(f);
+	}
+	fl->fl_ready = 0;
+	fl->fl_msgid = 0;
+	fl->fl_time  = NNI_TIME_ZERO;
+}
+
+static void
+zt_pipe_dorecv(zt_pipe *p)
+{
+	nni_aio *aio = p->zp_user_rxaio;
+	nni_time now = nni_clock();
+
+	if (aio == NULL) {
+		return;
+	}
+
+	for (int i = 0; i < zt_recvq; i++) {
+		zt_fraglist *fl = &p->zp_recvq[i];
+		zt_frag *    f;
+		size_t       len;
+		int          rv;
+		uint8_t *    ptr;
+		nni_msg *    msg;
+
+		if (now > (fl->fl_time + zt_recv_stale)) {
+			// fragment list is stale, clean it.
+			zt_fraglist_free(fl);
+			continue;
+		}
+		if (!fl->fl_ready) {
+			continue;
+		}
+		// Got data.  Let's pass it up.
+		f   = nni_list_last(&fl->fl_frags);
+		len = f->f_len + f->f_offset;
+
+		if ((rv = nni_msg_alloc(&msg, len)) != 0) {
+			nni_aio_finish_error(aio, rv);
+			zt_fraglist_free(fl);
+			return;
+		}
+
+		ptr = nni_msg_body(msg);
+		NNI_LIST_FOREACH (&fl->fl_frags, f) {
+			memcpy(ptr, f->f_data, f->f_len);
+			ptr += f->f_len;
+		}
+		zt_fraglist_free(fl);
+		nni_aio_finish_msg(aio, msg);
+		return;
+	}
+}
+static void
 zt_pipe_recv(void *arg, nni_aio *aio)
 {
-	nni_aio_finish(aio, NNG_ENOTSUP, 0);
+	zt_pipe *p = arg;
+
+	nni_mtx_lock(&zt_lk);
+	if (nni_aio_start(aio, zt_pipe_cancel_recv, p) != 0) {
+		nni_mtx_unlock(&zt_lk);
+		return;
+	}
+	p->zp_user_rxaio = aio;
+	zt_pipe_dorecv(p);
+	nni_mtx_unlock(&zt_lk);
 }
 
 static uint16_t

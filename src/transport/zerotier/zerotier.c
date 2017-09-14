@@ -102,7 +102,6 @@ enum zt_tunables {
 
 enum zt_op_codes {
 	zt_op_data     = 0x00, // data, final fragment
-	zt_op_data_mf  = 0x01, // data, more fragments
 	zt_op_conn_req = 0x10, // connect request
 	zt_op_conn_ack = 0x12, // connect accepted
 	zt_op_disc_req = 0x20, // disconnect request (no ack)
@@ -205,9 +204,7 @@ struct zt_pipe {
 	nni_aio *     zp_user_rxaio;
 	zt_fraglist   zp_recvq[zt_recvq];
 
-	nni_aio *zp_rxaio;
 	nni_aio *zp_pngaio;
-	nni_msg *zp_rxmsg;
 };
 
 typedef struct zt_creq zt_creq;
@@ -791,7 +788,7 @@ zt_ep_virtual_recv(
 }
 
 static void
-zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len, int last)
+zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 {
 	nni_aio *    aio;
 	uint16_t     msgid;
@@ -871,10 +868,11 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len, int last)
 		fl->fl_nfrags = nfrags;
 		fl->fl_fragsz = fragsz;
 		fl->fl_msgid  = msgid;
+		fl->fl_time   = nni_clock();
 
 		// Set the missing mask.
 		memset(fl->fl_missing, 0xff, nfrags / 8);
-		fl->fl_missing[i] |= ((1 << (nfrags % 8)) - 1);
+		fl->fl_missing[nfrags / 8] |= ((1 << (nfrags % 8)) - 1);
 	}
 	if ((nfrags != fl->fl_nfrags) || (fragsz != fl->fl_fragsz) ||
 	    (fragno >= nfrags) || (fragsz == 0) || (nfrags == 0) ||
@@ -886,7 +884,7 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len, int last)
 	}
 
 	bit = (uint8_t)(1 << (fragno % 8));
-	if (fl->fl_missing[fragno / 8] & bit) {
+	if ((fl->fl_missing[fragno / 8] & bit) == 0) {
 		// We've already got this fragment, ignore it.  We don't
 		// bother to check for changed data.
 		return;
@@ -907,7 +905,7 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len, int last)
 		}
 	}
 
-	for (i = 0; i < fl->fl_missingsz; i++) {
+	for (i = 0; i < ((nfrags + 7) / 8); i++) {
 		if (fl->fl_missing[i]) {
 			return;
 		}
@@ -941,6 +939,9 @@ zt_pipe_virtual_recv(zt_pipe *p, uint8_t op, const uint8_t *data, size_t len)
 {
 	printf("PIPE VIRTUAL RECV!\n");
 	switch (op) {
+	case zt_op_data:
+		zt_pipe_recv_data(p, data, len);
+		return;
 	case zt_op_disc_req:
 		zt_pipe_recv_disc_req(p, data, len);
 		return;
@@ -1579,7 +1580,6 @@ zt_pipe_close(void *arg)
 	zt_pipe *p = arg;
 	nni_aio *aio;
 
-	printf("PIPE CLOSE CALLED!\n");
 	nni_mtx_lock(&zt_lk);
 	p->zp_closed = 1;
 	if ((aio = p->zp_user_rxaio) != NULL) {
@@ -1588,7 +1588,6 @@ zt_pipe_close(void *arg)
 	}
 	zt_pipe_send_disc_req(p);
 	nni_mtx_unlock(&zt_lk);
-	printf("PIPE CLOSE DONE\n");
 }
 
 static void
@@ -1596,8 +1595,6 @@ zt_pipe_fini(void *arg)
 {
 	zt_pipe *p   = arg;
 	zt_node *ztn = p->zp_ztn;
-
-	nni_aio_stop(p->zp_rxaio);
 
 	// This tosses the connection details and all state.
 	nni_mtx_lock(&zt_lk);
@@ -1611,11 +1608,6 @@ zt_pipe_fini(void *arg)
 	}
 
 	NNI_FREE_STRUCT(p);
-}
-
-static void
-zt_pipe_recv_cb(void *arg)
-{
 }
 
 static int
@@ -1659,8 +1651,7 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 		p->zp_laddr = laddr;
 	}
 
-	if (((rv = nni_aio_init(&p->zp_rxaio, zt_pipe_recv_cb, p)) != 0) ||
-	    ((rv = nni_idhash_insert(ztn->zn_pipes, p->zp_laddr, p)) != 0) ||
+	if (((rv = nni_idhash_insert(ztn->zn_pipes, p->zp_laddr, p)) != 0) ||
 	    ((rv = nni_idhash_insert(ztn->zn_peers, p->zp_raddr, p)) != 0)) {
 		zt_pipe_fini(p);
 	}
@@ -1704,6 +1695,7 @@ zt_pipe_send(void *arg, nni_aio *aio)
 	uint16_t fragno;
 	uint16_t fragsz;
 	size_t   bytes;
+	nni_msg *m;
 
 	nni_mtx_lock(&zt_lk);
 	if (nni_aio_start(aio, NULL, p) != 0) {
@@ -1719,10 +1711,13 @@ zt_pipe_send(void *arg, nni_aio *aio)
 
 	fragsz = (uint16_t)(p->zp_mtu - zt_offset_data_data);
 
-	bytes = 0;
-	for (i = 0; i < aio->a_niov; i++) {
-		bytes += aio->a_iov[i].iov_len;
-	}
+	if ((m = nni_aio_get_msg(aio)) == NULL) {
+		nni_aio_finish_error(aio, NNG_EINVAL);
+		nni_mtx_unlock(&zt_lk);
+		return;
+	};
+
+	bytes = nni_msg_header_len(m) + nni_msg_len(m);
 	if (bytes >= (0xfffe * fragsz)) {
 		nni_aio_finish_error(aio, NNG_EMSGSIZE);
 		nni_mtx_unlock(&zt_lk);
@@ -1737,33 +1732,49 @@ zt_pipe_send(void *arg, nni_aio *aio)
 	}
 
 	offset = 0;
-	while (aio->a_niov != 0) {
-		// We send in chunks.  Each chunk is at most the
-		// optimimum physical MTU minus the room we need for
-		// the headers.
-		len = fragsz;
-		if (aio->a_iov[0].iov_len > len) {
-			memcpy(data + zt_offset_data_data,
-			    aio->a_iov[0].iov_buf, len);
-			aio->a_iov[0].iov_buf += len;
-		} else {
-			len = aio->a_iov[0].iov_len;
-			memcpy(data + zt_offset_data_data,
-			    aio->a_iov[0].iov_buf, len);
-			aio->a_niov--;
-			for (int i = 0; i < aio->a_niov; i++) {
-				aio->a_iov[i] = aio->a_iov[i + 1];
+	fragno = 0;
+	do {
+		uint8_t *dest    = data + zt_offset_data_data;
+		size_t   room    = fragsz;
+		size_t   fraglen = 0;
+
+		// Prepend the header first.
+		if ((len = nni_msg_header_len(m)) > 0) {
+			if (len > fragsz) {
+				// This shouldn't happen!  SP headers are
+				// supposed to be quite small.
+				nni_aio_finish_error(aio, NNG_EMSGSIZE);
+				nni_mtx_unlock(&zt_lk);
+				return;
 			}
-			NNI_ASSERT(fragno + 1 == nfrags);
+			memcpy(dest, nni_msg_header(m), len);
+			dest += len;
+			room -= len;
+			offset += len;
+			fraglen += len;
+			nni_msg_header_clear(m);
 		}
+
+		len = nni_msg_len(m);
+		if (len > room) {
+			len = room;
+		}
+		memcpy(dest, nni_msg_body(m), len);
+
+		nng_msg_trim(m, len);
 		NNI_PUT16(data + zt_offset_data_id, id);
 		NNI_PUT16(data + zt_offset_data_fragsz, fragsz);
-		NNI_PUT16(data + zt_offset_data_frag, fragno++);
+		NNI_PUT16(data + zt_offset_data_frag, fragno);
 		NNI_PUT16(data + zt_offset_data_nfrag, nfrags);
 		offset += len;
+		fraglen += len;
+		fragno++;
 		zt_send(p->zp_ztn, p->zp_nwid, zt_op_data, p->zp_raddr,
-		    p->zp_laddr, data, len);
-	}
+		    p->zp_laddr, data, fraglen + zt_offset_data_data);
+	} while (nni_msg_len(m) != 0);
+
+	nni_aio_set_msg(aio, NULL);
+	nni_msg_free(m);
 	nni_aio_finish(aio, 0, offset);
 	nni_mtx_unlock(&zt_lk);
 }
@@ -2010,7 +2021,8 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// port may be zero in this case, to indicate
 		// that the server should allocate an ephemeral
 		// port.  We do allow the same form of URL including
-		// the node address, but that must be zero, a wild card,
+		// the node address, but that must be zero, a wild
+		// card,
 		// or our own node address.
 		if (zt_parsehex(&u, &nwid, 0) != 0) {
 			return (NNG_EADDRINVAL);
@@ -2104,7 +2116,8 @@ zt_ep_bind_locked(zt_ep *ep)
 
 	node = ep->ze_laddr >> 24;
 	if ((node != 0) && (node != ztn->zn_self)) {
-		// User requested node id, but it doesn't match our own.
+		// User requested node id, but it doesn't match our
+		// own.
 		return (NNG_EADDRINVAL);
 	}
 
@@ -2319,6 +2332,9 @@ zt_ep_connect(void *arg, nni_aio *aio)
 			return;
 		}
 
+		if ((ep->ze_raddr >> 24) == 0) {
+			ep->ze_raddr |= (ep->ze_ztn->zn_self << 24);
+		}
 		nni_aio_list_append(&ep->ze_aios, aio);
 
 		ep->ze_creq_try = 1;

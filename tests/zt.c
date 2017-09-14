@@ -242,4 +242,7 @@ TestMain("ZeroTier Transport", {
 		So(nng_dial(s2, addr, NULL, 0) == 0);
 	});
 #endif
+
+	trantest_test_all("zt://" NWID "/*:%u");
+
 })

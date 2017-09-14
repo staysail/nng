@@ -128,16 +128,13 @@ enum zt_offsets {
 	zt_offset_data_frag   = 0x10, // fragment number, first is 1 (2 bytes)
 	zt_offset_data_nfrag  = 0x12, // total fragments (2 bytes)
 	zt_offset_data_data   = 0x14, // user payload
-
-	NZT_OFFS_PAYLOAD = 10, // other payload
-
-	zt_size_headers  = 0x0C,
-	zt_size_conn_req = 0x0E,
-	zt_size_conn_ack = 0x0E,
-	zt_size_disc_req = 0x0C,
-	zt_size_ping_req = 0x0C,
-	zt_size_ping_ack = 0x0C,
-	zt_size_data     = 0x14,
+	zt_size_headers       = 0x0C, // size of headers
+	zt_size_conn_req      = 0x0E, // size of conn_req (connect request)
+	zt_size_conn_ack      = 0x0E, // size of conn_ack (connect reply)
+	zt_size_disc_req      = 0x0C, // size of disc_req (disconnect)
+	zt_size_ping_req      = 0x0C, // size of ping request
+	zt_size_ping_ack      = 0x0C, // size of ping reply
+	zt_size_data          = 0x14, // size of data message (w/o payload)
 };
 
 enum zt_errors {
@@ -1899,12 +1896,19 @@ zt_ep_fini(void *arg)
 }
 
 static int
-zt_parsehex(const char **sp, uint64_t *valp)
+zt_parsehex(const char **sp, uint64_t *valp, int wildok)
 {
 	int         n;
 	const char *s = *sp;
 	char        c;
 	uint64_t    v;
+
+	if (wildok && *s == '*') {
+		*valp = 0;
+		s++;
+		*sp = s;
+		return (0);
+	}
 
 	for (v = 0, n = 0; (n < 16) && isxdigit(c = tolower(*s)); n++, s++) {
 		v *= 16;
@@ -1989,8 +1993,8 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// The remote node must be a 40 bit address
 		// (max), and we require a non-zero port to
 		// connect to.
-		if ((zt_parsehex(&u, &nwid) != 0) || (*u++ != '/') ||
-		    (zt_parsehex(&u, &node) != 0) ||
+		if ((zt_parsehex(&u, &nwid, 0) != 0) || (*u++ != '/') ||
+		    (zt_parsehex(&u, &node, 1) != 0) ||
 		    (node > 0xffffffffffull) || (*u++ != ':') ||
 		    (zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
 		    (port > zt_max_port) || (port == 0)) {
@@ -2005,12 +2009,26 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 		// Listen mode is just zt://<nwid>:<port>.  The
 		// port may be zero in this case, to indicate
 		// that the server should allocate an ephemeral
-		// port.
-		if ((zt_parsehex(&u, &nwid) != 0) || (*u++ != ':') ||
-		    (zt_parsedec(&u, &port) != 0) || (*u != '\0') ||
-		    (port > zt_max_port)) {
+		// port.  We do allow the same form of URL including
+		// the node address, but that must be zero, a wild card,
+		// or our own node address.
+		if (zt_parsehex(&u, &nwid, 0) != 0) {
 			return (NNG_EADDRINVAL);
 		}
+		node = 0;
+		// Look for optional node address.
+		if (*u == '/') {
+			u++;
+			if (zt_parsehex(&u, &node, 1) != 0) {
+				return (NNG_EADDRINVAL);
+			}
+		}
+		if ((*u++ != ':') || (zt_parsedec(&u, &port) != 0) ||
+		    (*u != '\0') || (port > zt_max_port)) {
+			return (NNG_EADDRINVAL);
+		}
+		ep->ze_laddr = node;
+		ep->ze_laddr <<= 24;
 		ep->ze_laddr |= port;
 		ep->ze_raddr = 0;
 		break;
@@ -2073,6 +2091,7 @@ zt_ep_bind_locked(zt_ep *ep)
 {
 	int      rv;
 	uint64_t port;
+	uint64_t node;
 	zt_node *ztn;
 
 	// If we haven't already got a ZT node, get one.
@@ -2083,7 +2102,13 @@ zt_ep_bind_locked(zt_ep *ep)
 		ztn = ep->ze_ztn;
 	}
 
-	if (ep->ze_laddr == 0) {
+	node = ep->ze_laddr >> 24;
+	if ((node != 0) && (node != ztn->zn_self)) {
+		// User requested node id, but it doesn't match our own.
+		return (NNG_EADDRINVAL);
+	}
+
+	if ((ep->ze_laddr & zt_port_mask) == 0) {
 		// ask for an ephemeral port
 		if ((rv = nni_idhash_alloc(ztn->zn_ports, &port, ep)) != 0) {
 			return (rv);

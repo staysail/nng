@@ -178,19 +178,30 @@ acknowledged (in this version).
     0                   1                   2                   3
     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                           message ID                          |
+   |          message ID           |         fragment size         |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |        fragment number        |        total fragments        |
    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
    |       user data...
    +-+-+-+-+-+-+-+-
 
-All fragments, except for the last, must be the same size.  The last
-fragment shall have the fragment number equal to total fragments, and
-the first fragment shall have fragment number 1.  Under typical
-optimal conditions, with an optimal MTU of 1400 bytes, the maximum
-message that can be transmitted is approximately 86 MB.  Specifically
-it is (65534 * (1400 - 20)) = 90,436,920 bytes.
+All fragments, except for the last, *MUST* be the same size.  The fragment
+size field carries the size of every fragment, except that the last
+fragment may be shorter; however even for the last fragment, the fragment
+size *MUST* be the size of the rest of the fragments.  This is necessary
+to allow a receiver to know the fragment size of the other fragments even
+if the final fragment is received before any others.  (Typically this may
+occur if a message consisting of two fragments arrives with fragments
+out of order.)
+
+The last fragment shall have the fragment number equal to
+the total fragments minus one, and the first fragment shall have fragment
+number 0.  Under typical optimal conditions, with an optimal MTU of 1400
+bytes, the largest message that can be transmitted is approximately 86 MB.
+Specifically the limit is (65534 * (1400 - 20)) = 90,436,920 bytes.
+(Larger MTUs may be used, if the implementation determines that it is
+advantageous to do so.  Doing so would necessarily give a larger maximum
+message size.)
 
 However, transmitting such a large message would require sending over
 65 thousand fragments, and given the likelihood of fragment loss, and
@@ -206,9 +217,11 @@ receiver is willing to accept.
 Each fragment for a given message must carry the same `message ID`.
 Implementations *MUST* initialize this to a random value when starting
 a conversation, and *MUST* increment this each time a new message is sent.
+Message IDs of zero are not permitted; implementations *MUST* skip past zero
+when incrementing message IDs.
 
 Implementations may detect the loss of a message by noticing skips in the
-message IDs that are received.
+message IDs that are received, accounting for the expected skip past zero.
 
 
 // XXX: OLD VERSION HERE:

@@ -112,27 +112,24 @@ enum zt_op_codes {
 };
 
 enum zt_offsets {
-	zt_offset_op         = 0x00,
-	zt_offset_flags      = 0x01,
-	zt_offset_version    = 0x02, // protocol version number (2 bytes)
-	zt_offset_zero1      = 0x04, // reserved, must be zero (1 byte)
-	zt_offset_dst_port   = 0x05, // destination port (3 bytes)
-	zt_offset_zero2      = 0x08, // reserved, must be zero (1 byte)
-	zt_offset_src_port   = 0x09, // source port number (3 bytes)
-	zt_offset_creq_proto = 0x0C, // SP protocol number (2 bytes)
-	zt_offset_cack_proto = 0x0C, // SP protocol number (2 bytes)
-	zt_offset_err_code   = 0x0C, // error code (1 byte)
-	zt_offset_err_msg    = 0x0D, // error message (string)
-	zt_offset_data_id    = 0x0C, // message ID (4 bytes)
-	zt_offset_data_frag  = 0x10, // fragment number, first is 1 (2 bytes)
-	zt_offset_data_nfrag = 0x12, // total fragments (2 bytes)
-	zt_offset_data_data  = 0x14, // user payload
+	zt_offset_op          = 0x00,
+	zt_offset_flags       = 0x01,
+	zt_offset_version     = 0x02, // protocol version number (2 bytes)
+	zt_offset_zero1       = 0x04, // reserved, must be zero (1 byte)
+	zt_offset_dst_port    = 0x05, // destination port (3 bytes)
+	zt_offset_zero2       = 0x08, // reserved, must be zero (1 byte)
+	zt_offset_src_port    = 0x09, // source port number (3 bytes)
+	zt_offset_creq_proto  = 0x0C, // SP protocol number (2 bytes)
+	zt_offset_cack_proto  = 0x0C, // SP protocol number (2 bytes)
+	zt_offset_err_code    = 0x0C, // error code (1 byte)
+	zt_offset_err_msg     = 0x0D, // error message (string)
+	zt_offset_data_id     = 0x0C, // message ID (2 bytes)
+	zt_offset_data_fragsz = 0x0E, // fragment size
+	zt_offset_data_frag   = 0x10, // fragment number, first is 1 (2 bytes)
+	zt_offset_data_nfrag  = 0x12, // total fragments (2 bytes)
+	zt_offset_data_data   = 0x14, // user payload
 
-	zt_offset_opflags    = 0,  // opcode and flags (1 byte)
-	zt_offset_data_frlen = 12, // fragment length (2 bytes)
-	zt_offset_data_froff = 14, // fragment offset (4 bytes)
-	zt_offset_protocol   = 10, // protocol number (2 bytes)
-	NZT_OFFS_PAYLOAD     = 10, // other payload
+	NZT_OFFS_PAYLOAD = 10, // other payload
 
 	zt_size_headers  = 0x0C,
 	zt_size_conn_req = 0x0E,
@@ -204,11 +201,11 @@ struct zt_pipe {
 	uint64_t      zp_raddr;
 	uint16_t      zp_peer;
 	uint16_t      zp_proto;
+	uint16_t      zp_next_msgid;
 	size_t        zp_rcvmax;
 	size_t        zp_mtu;
 	int           zp_closed;
 	nni_aio *     zp_user_rxaio;
-	uint32_t      zp_next_msgid;
 	zt_fraglist   zp_recvq[zt_recvq];
 
 	nni_aio *zp_rxaio;
@@ -279,6 +276,7 @@ static nni_list zt_nodes;
 static void zt_ep_send_conn_req(zt_ep *);
 static void zt_ep_conn_req_cb(void *);
 static void zt_ep_doaccept(zt_ep *);
+static void zt_pipe_dorecv(zt_pipe *);
 static int  zt_pipe_init(zt_pipe **, zt_ep *, uint64_t, uint64_t);
 static void zt_fraglist_clear(zt_fraglist *);
 static void zt_fraglist_free(zt_fraglist *);
@@ -561,7 +559,7 @@ zt_send(zt_node *ztn, uint64_t nwid, uint8_t op, uint64_t raddr,
 	uint64_t dstmac = zt_node_to_mac(raddr >> 24, nwid);
 	uint64_t now    = zt_now();
 
-	NNI_ASSERT(len >= zt_offset_protocol);
+	NNI_ASSERT(len >= zt_size_headers);
 	data[zt_offset_op]    = op;
 	data[zt_offset_flags] = 0;
 	data[zt_offset_zero1] = 0;
@@ -606,7 +604,7 @@ zt_pipe_send_conn_ack(zt_pipe *p)
 {
 	uint8_t data[zt_size_conn_ack];
 
-	NNI_PUT16(data + zt_offset_protocol, p->zp_proto);
+	NNI_PUT16(data + zt_offset_cack_proto, p->zp_proto);
 	zt_send(p->zp_ztn, p->zp_nwid, zt_op_conn_ack, p->zp_raddr,
 	    p->zp_laddr, data, sizeof(data));
 }
@@ -616,7 +614,7 @@ zt_ep_send_conn_req(zt_ep *ep)
 {
 	uint8_t data[zt_size_conn_req];
 
-	NNI_PUT16(data + zt_offset_protocol, ep->ze_proto);
+	NNI_PUT16(data + zt_offset_creq_proto, ep->ze_proto);
 	zt_send(ep->ze_ztn, ep->ze_nwid, zt_op_conn_req, ep->ze_raddr,
 	    ep->ze_laddr, data, sizeof(data));
 }
@@ -657,7 +655,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 		nni_aio_finish_error(aio, rv);
 		return;
 	}
-	NNI_GET16(data + zt_offset_protocol, p->zp_peer);
+	NNI_GET16(data + zt_offset_cack_proto, p->zp_peer);
 
 	// Reset the address of the endpoint, so that the next call to
 	// ep_connect will bind a new one -- we are using this one for the
@@ -715,7 +713,7 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// pending acceptors.
 	i = ep->ze_creq_head % zt_listenq;
 
-	NNI_GET16(data + zt_offset_protocol, ep->ze_creqs[i].cr_proto);
+	NNI_GET16(data + zt_offset_creq_proto, ep->ze_creqs[i].cr_proto);
 	ep->ze_creqs[i].cr_raddr  = raddr;
 	ep->ze_creqs[i].cr_expire = nni_clock() + zt_listen_expire;
 	ep->ze_creq_head++;
@@ -795,26 +793,133 @@ zt_ep_virtual_recv(
 	}
 }
 
-#if 0
 static void
 zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len, int last)
 {
-	nni_aio *aio;
+	nni_aio *    aio;
+	uint16_t     msgid;
+	uint16_t     fragno;
+	uint16_t     nfrags;
+	uint16_t     fragsz;
+	zt_fraglist *fl;
+	int          i;
+	int          slot;
+	uint8_t      bit;
+	uint8_t *    body;
+	int          rv;
+
 	if (len < zt_size_data) {
 		// Runt frame.  Drop it and close pipe with a protocol error.
 		if ((aio = p->zp_user_rxaio) != NULL) {
 			p->zp_user_rxaio = NULL;
 			p->zp_closed     = 1;
+			// XXX: send an error to other side..
+			// XXX: zt_pipe_send_error(p, protoocol....).
 			nni_aio_finish_error(aio, NNG_EPROTO);
 			return;
 		}
 	}
 
-	NNI_GET16(data + zt_offset_data_id);
-	NNI_GET32(data + zt_offset_data_frlen, frlen);
-	NNI_GET32(data + zt_offset_data_froff, data)
+	NNI_GET16(data + zt_offset_data_id, msgid);
+	NNI_GET16(data + zt_offset_data_fragsz, fragsz);
+	NNI_GET16(data + zt_offset_data_frag, fragno);
+	NNI_GET16(data + zt_offset_data_nfrag, nfrags);
+	len -= zt_offset_data_data;
+	data += zt_offset_data_data;
+
+	// Check for cases where message size is clearly too large.  Note
+	// that we only can catch the case where a message is larger by
+	// more than a fragment, since the final fragment may be shorter,
+	// and we won't know that until we receive it.
+	if ((nfrags * fragsz) >= (p->zp_rcvmax + fragsz)) {
+		// XXX: zt_pipe_send_error(p, emsgtoobig);
+		return;
+	}
+
+	// We run the recv logic once, to clear stale fragment entries.
+	zt_pipe_dorecv(p);
+
+	// Find a suitable fragment slot.
+	slot = -1;
+	for (i = 0; i < zt_recvq; i++) {
+		fl = &p->zp_recvq[i];
+		// This was our message ID, we always use it.
+		if (msgid == fl->fl_msgid) {
+			slot = i;
+			break;
+		}
+
+		if (slot < 0) {
+			slot = i;
+		} else if (fl->fl_time < p->zp_recvq[slot].fl_time) {
+			// This has an earlier expiration, so lets choose it.
+			slot = i;
+		}
+	}
+
+	NNI_ASSERT(slot >= 0);
+
+	fl = &p->zp_recvq[slot];
+	if (fl->fl_msgid != msgid) {
+		// First fragment we've received for this message (but might
+		// not be first fragment for message!)
+		zt_fraglist_clear(fl);
+
+		rv = nni_msg_alloc(&fl->fl_msg, nfrags * fragsz);
+		if (rv != 0) {
+			// XXX: out of memory, close the pipe?
+			return;
+		}
+
+		fl->fl_nfrags = nfrags;
+		fl->fl_fragsz = fragsz;
+		fl->fl_msgid  = msgid;
+
+		// Set the missing mask.
+		memset(fl->fl_missing, 0xff, nfrags / 8);
+		fl->fl_missing[i] |= ((1 << (nfrags % 8)) - 1);
+	}
+	if ((nfrags != fl->fl_nfrags) || (fragsz != fl->fl_fragsz) ||
+	    (fragno >= nfrags) || (fragsz == 0) || (nfrags == 0) ||
+	    ((fragno != (nfrags - 1)) && (len != fragsz))) {
+		// Protocol error, message parameters changed.
+		// zt_pipe_send_error(p, bad message);
+		zt_fraglist_clear(fl);
+		return;
+	}
+
+	bit = (uint8_t)(1 << (fragno % 8));
+	if (fl->fl_missing[fragno / 8] & bit) {
+		// We've already got this fragment, ignore it.  We don't
+		// bother to check for changed data.
+		return;
+	}
+
+	fl->fl_missing[fragno / 8] &= ~(bit);
+	body = nni_msg_body(fl->fl_msg);
+	body += fragno * fragsz;
+	memcpy(body, data, len);
+	if (fragno == (nfrags - 1)) {
+		// Last frag, maybe shorten the message.
+		nni_msg_chop(fl->fl_msg, (fragsz - len));
+		if (nni_msg_len(fl->fl_msg) > p->zp_rcvmax) {
+			// Strict enforcement of max recv.
+			zt_fraglist_clear(fl);
+			// XXX: zt_pipe_send_error(p, emsgsize);
+			return;
+		}
+	}
+
+	for (i = 0; i < fl->fl_missingsz; i++) {
+		if (fl->fl_missing[i]) {
+			return;
+		}
+	}
+
+	// We got all fragments... try to send it up.
+	fl->fl_ready = 1;
+	zt_pipe_dorecv(p);
 }
-#endif
 
 static void
 zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
@@ -822,8 +927,8 @@ zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
 	nni_aio *aio;
 	printf("REMOTE DISCONNECT!\n");
 	// NB: lock held already.
-	// We don't bother to check the length... we're going to disconnect
-	// anyway.
+	// We don't bother to check the length... we're going to
+	// disconnect anyway.
 	if ((aio = p->zp_user_rxaio) != NULL) {
 		p->zp_user_rxaio = NULL;
 		p->zp_closed     = 1;
@@ -832,8 +937,8 @@ zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
 }
 
 // This function is called when we have determined that a frame has
-// arrived for a pipe.  The remote and local addresses were both matched
-// by the caller.
+// arrived for a pipe.  The remote and local addresses were both
+// matched by the caller.
 static void
 zt_pipe_virtual_recv(zt_pipe *p, uint8_t op, const uint8_t *data, size_t len)
 {
@@ -917,9 +1022,9 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 		return;
 	}
 
-	// We have a request for which we have no listener, and no pipe.
-	// For some of these we send back a NAK, but for others we just
-	// drop the frame.
+	// We have a request for which we have no listener, and no
+	// pipe. For some of these we send back a NAK, but for others
+	// we just drop the frame.
 	switch (op) {
 	case zt_op_conn_req:
 		// No listener.  Connection refused.
@@ -1177,7 +1282,8 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 		udp                      = ztn->zn_udp4;
 		port                     = htons(sin->sin_port);
 		// XXX:
-		// inet_ntop(AF_INET, &sin->sin_addr, abuf, sizeof(abuf));
+		// inet_ntop(AF_INET, &sin->sin_addr, abuf,
+		// sizeof(abuf));
 		break;
 	case AF_INET6:
 		addr.s_un.s_in6.sa_family = NNG_AF_INET6;
@@ -1186,7 +1292,8 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 		port                      = htons(sin6->sin6_port);
 		memcpy(addr.s_un.s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
 		// XXX:
-		// inet_ntop(AF_INET6, &sin6->sin6_addr, abuf, sizeof(abuf));
+		// inet_ntop(AF_INET6, &sin6->sin6_addr, abuf,
+		// sizeof(abuf));
 		break;
 	default:
 		// No way to understand the address.
@@ -1535,7 +1642,7 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 	p->zp_raddr      = raddr;
 	p->zp_mtu        = ep->ze_phymtu;
 	p->zp_rcvmax     = ep->ze_rcvmax;
-	p->zp_next_msgid = nni_random();
+	p->zp_next_msgid = (uint16_t) nni_random();
 
 	if (laddr == 0) {
 		// Locate a suitable port number.
@@ -1544,10 +1651,9 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 			return (rv);
 		}
 
-		// Now we stash the port here.  We use the same address as the
-		// endpoint, but we strip out the port number and overwrite
-		// with
-		// our own.
+		// Now we stash the port here.  We use the same address
+		// as the endpoint, but we strip out the port number
+		// and overwrite with our own.
 		p->zp_laddr = ep->ze_laddr;
 		p->zp_laddr >>= 24;
 		p->zp_laddr <<= 24;
@@ -1564,7 +1670,8 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 
 	// the largest fragment we can accept on this pipe
 	maxfrag = p->zp_mtu - zt_offset_data_data;
-	// and the larger fragment count we can accept on this pipe (round up)
+	// and the larger fragment count we can accept on this pipe
+	// (round up)
 	maxfrags = (p->zp_rcvmax + (maxfrag - 1)) / maxfrag;
 
 	for (i = 0; i < zt_recvq; i++) {
@@ -1587,17 +1694,18 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 static void
 zt_pipe_send(void *arg, nni_aio *aio)
 {
-	// As we are sending UDP, and there is no callback to worry about,
-	// we just go ahead and send out a stream of messages synchronously.
+	// As we are sending UDP, and there is no callback to worry
+	// about, we just go ahead and send out a stream of messages
+	// synchronously.
 	zt_pipe *p = arg;
 	size_t   offset;
 	size_t   len;
 	int      i;
 	uint8_t  data[ZT_MAX_MTU];
-	uint32_t id;
+	uint16_t id;
 	uint16_t nfrags;
 	uint16_t fragno;
-	size_t   fragsz;
+	uint16_t fragsz;
 	size_t   bytes;
 
 	nni_mtx_lock(&zt_lk);
@@ -1612,7 +1720,7 @@ zt_pipe_send(void *arg, nni_aio *aio)
 		return;
 	}
 
-	fragsz = (p->zp_mtu - zt_offset_data_data);
+	fragsz = (uint16_t)(p->zp_mtu - zt_offset_data_data);
 
 	bytes = 0;
 	for (i = 0; i < aio->a_niov; i++) {
@@ -1626,11 +1734,16 @@ zt_pipe_send(void *arg, nni_aio *aio)
 	// above check means nfrags will fit in 16-bits.
 	nfrags = (uint16_t)((bytes + (fragsz - 1)) / fragsz);
 
-	id     = p->zp_next_msgid++;
+	// get the next message ID, but skip 0
+	if ((id = p->zp_next_msgid++) == 0) {
+		id = p->zp_next_msgid++;
+	}
+
 	offset = 0;
 	while (aio->a_niov != 0) {
-		// We send in chunks.  Each chunk is at most the optimimum
-		// physical MTU minus the room we need for the headers.
+		// We send in chunks.  Each chunk is at most the
+		// optimimum physical MTU minus the room we need for
+		// the headers.
 		len = fragsz;
 		if (aio->a_iov[0].iov_len > len) {
 			memcpy(data + zt_offset_data_data,
@@ -1646,8 +1759,9 @@ zt_pipe_send(void *arg, nni_aio *aio)
 			}
 			NNI_ASSERT(fragno + 1 == nfrags);
 		}
-		NNI_PUT32(data + zt_offset_data_id, id);
-		NNI_PUT16(data + zt_offset_data_frag, ++fragno);
+		NNI_PUT16(data + zt_offset_data_id, id);
+		NNI_PUT16(data + zt_offset_data_fragsz, fragsz);
+		NNI_PUT16(data + zt_offset_data_frag, fragno++);
 		NNI_PUT16(data + zt_offset_data_nfrag, nfrags);
 		offset += len;
 		zt_send(p->zp_ztn, p->zp_nwid, zt_op_data, p->zp_raddr,
@@ -2146,8 +2260,8 @@ zt_ep_conn_req_cb(void *arg)
 		}
 	}
 
-	// These are failure modes.  Either we timed out too many times,
-	// or an error occurred.
+	// These are failure modes.  Either we timed out too many
+	// times, or an error occurred.
 
 	ep->ze_creq_try = 0;
 	while ((uaio = nni_list_first(&ep->ze_aios)) != NULL) {
@@ -2164,9 +2278,10 @@ zt_ep_connect(void *arg, nni_aio *aio)
 	uint64_t port;
 	int      rv;
 
-	// We bind locally.  We'll use the address later when we give it to
-	// the pipe, but this allows us to receive the initial ack back from
-	// the server.  (This gives us an ephemeral address to work with.)
+	// We bind locally.  We'll use the address later when we give
+	// it to the pipe, but this allows us to receive the initial
+	// ack back from the server.  (This gives us an ephemeral
+	// address to work with.)
 
 	nni_mtx_lock(&zt_lk);
 
@@ -2191,7 +2306,8 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		    ep->ze_creq_aio, zt_ep_conn_req_cancel, ep);
 
 		// We send out the first connect message; it we are not
-		// yet attached to the network the message will be dropped.
+		// yet attached to the network the message will be
+		// dropped.
 		zt_ep_send_conn_req(ep);
 	}
 	nni_mtx_unlock(&zt_lk);

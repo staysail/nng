@@ -41,8 +41,6 @@ TestMain("ZeroTier Transport", {
 	char     path2[NNG_MAXADDRLEN] = "/tmp/zt_client";
 	unsigned port;
 
-	//	trantest_next_address(path1, "/tmp/zt_serv_1");
-	//	trantest_prev_address(path2, "/tmp/zt_clnt_1");
 	port = 5555;
 
 	atexit(nng_fini);
@@ -103,20 +101,6 @@ TestMain("ZeroTier Transport", {
 			So(nng_option_lookup(nng_opt_zt_home) ==
 			    nng_optid_zt_home);
 		});
-
-#if 0
-		Convey("And it can be started...", {
-			mkdir(path2, 0700);
-
-			So(nng_dialer_setopt(d, nng_optid_zt_home, path2,
-			       strlen(path2) + 1) == 0);
-
-			So(nng_dialer_start(d, 0) == NNG_ETIMEDOUT);
-
-			// Sleeping a bit
-			nng_usleep(10000000);
-		});
-#endif
 	});
 
 	Convey("We can create an ephemeral listener", {
@@ -192,56 +176,7 @@ TestMain("ZeroTier Transport", {
 		       d, nng_optid_zt_home, path2, strlen(path2) + 1) == 0);
 		So(nng_dialer_start(d, 0) == 0);
 
-		printf("NODE ID LISTENER IS %llx\n", node);
-#if 0
-		printf("ADDR is %s\n", addr);
-		So(nng_dialer_create(&d, s, addr) == 0);
-
-
-		Convey("And it can be started...", {
-			mkdir(path2, 0700);
-
-			So(nng_dialer_setopt(d, nng_optid_zt_home, path2,
-			       strlen(path2) + 1) == 0);
-
-			So(nng_dialer_start(d, 0) == NNG_ETIMEDOUT);
-
-			// Sleeping a bit
-			nng_usleep(10000000);
-		});
-#endif
 	});
-
-#if 0
-	Convey("We cannot connect to wild cards", {
-		nng_socket s;
-
-		char       addr[NNG_MAXADDRLEN];
-
-		So(nng_pair_open(&s) == 0);
-		Reset({ nng_close(s); });
-		trantest_next_address(addr, "zt://*:%u");
-		So(nng_dial(s, addr, NULL, 0) == NNG_EADDRINVAL);
-	});
-
-	Convey("We can bind to wild card", {
-		nng_socket s1;
-		nng_socket s2;
-		char       addr[NNG_MAXADDRLEN];
-
-		So(nng_pair_open(&s1) == 0);
-		So(nng_pair_open(&s2) == 0);
-		Reset({
-			nng_close(s2);
-			nng_close(s1);
-		});
-		trantest_next_address(addr, "tcp://*:%u");
-		So(nng_listen(s1, addr, NULL, 0) == 0);
-		// reset port back one
-		trantest_prev_address(addr, "tcp://127.0.0.1:%u");
-		So(nng_dial(s2, addr, NULL, 0) == 0);
-	});
-#endif
 
 	trantest_test_all("zt://" NWID "/*:%u");
 

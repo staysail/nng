@@ -177,6 +177,8 @@ struct zt_node {
 	nni_cv        zn_snd6_cv;
 };
 
+// The fragment list is used to keep track of incoming received
+// fragments for reassembly into a complete message.
 struct zt_fraglist {
 	nni_time     fl_time;  // time first frag was received
 	uint32_t     fl_msgid; // message id
@@ -202,9 +204,10 @@ struct zt_pipe {
 	size_t        zp_mtu;
 	int           zp_closed;
 	nni_aio *     zp_user_rxaio;
+	nni_time      zp_last_recv;
+	int           zp_ping_try;
 	zt_fraglist   zp_recvq[zt_recvq];
-
-	nni_aio *zp_pngaio;
+	nni_aio *     zp_pngaio;
 };
 
 typedef struct zt_creq zt_creq;
@@ -325,17 +328,12 @@ zt_node_rcv4_cb(void *arg)
 	struct sockaddr_in *    sin;
 	nng_sockaddr_in *       nsin;
 	uint64_t                now;
-	char                    abuf[64];
 
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
 		// of any reason for this to legitimately fail.
 		// Arguably we should inject a fallback delay, but for
 		// now we just carry on.
-		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket
-		// is closed or fails in a permanent way, then we need
-		// to stop the UDP work, and forward an error to all
-		// the other endpoints and pipes!
 		return;
 	}
 
@@ -345,9 +343,6 @@ zt_node_rcv4_cb(void *arg)
 	sin->sin_family      = AF_INET;
 	sin->sin_port        = nsin->sa_port;
 	sin->sin_addr.s_addr = nsin->sa_addr;
-	// inet_ntop(AF_INET, &sin->sin_addr, abuf, sizeof(abuf));
-	//	printf("NODE RECVv4 CB called RCV FROM %s %u!\n", abuf,
-	//	    htons(sin->sin_port));
 
 	nni_mtx_lock(&zt_lk);
 	now = zt_now();
@@ -379,17 +374,12 @@ zt_node_rcv6_cb(void *arg)
 	struct sockaddr_in6 *    sin6;
 	struct nng_sockaddr_in6 *nsin6;
 	uint64_t                 now;
-	char                     abuf[64];
 
 	if (nni_aio_result(aio) != 0) {
 		// Outside of memory exhaustion, we can't really think
 		// of any reason for this to legitimately fail.
 		// Arguably we should inject a fallback delay, but for
 		// now we just carry on.
-		// XXX: REVIEW THIS.  Its clearly wrong!  If the socket
-		// is closed or fails in a permanent way, then we need
-		// to stop the UDP work, and forward an error to all
-		// the other endpoints and pipes!
 		return;
 	}
 
@@ -399,17 +389,12 @@ zt_node_rcv6_cb(void *arg)
 	sin6->sin6_family = AF_INET6;
 	sin6->sin6_port   = nsin6->sa_port;
 	memcpy(&sin6->sin6_addr, nsin6->sa_addr, 16);
-	// inet_ntop(AF_INET6, &sin6->sin6_addr, abuf, sizeof(abuf));
-	//	printf("NODE RECVv6 CB called RCV FROM %s %u!\n", abuf,
-	//	    htons(sin6->sin6_port));
 
 	nni_mtx_lock(&zt_lk);
 	now = zt_now(); // msec
 
 	// We are not going to perform any validation of the data; we
 	// just pass this straight into the ZeroTier core.
-	// XXX: CHECK THIS, if it fails then we have a fatal error with
-	// the znode, and have to shut everything down.
 	ZT_Node_processWirePacket(ztn->zn_znode, NULL, now, 0, (void *) &sa,
 	    ztn->zn_rcv6_buf, aio->a_count, &now);
 
@@ -585,6 +570,12 @@ zt_send_err(zt_node *ztn, uint64_t nwid, uint64_t raddr, uint64_t laddr,
 }
 
 static void
+zt_pipe_send_err(zt_pipe *p, uint8_t err, const char *msg)
+{
+	zt_send_err(p->zp_ztn, p->zp_nwid, p->zp_raddr, p->zp_laddr, err, msg);
+}
+
+static void
 zt_pipe_send_disc_req(zt_pipe *p)
 {
 	uint8_t data[zt_size_disc_req];
@@ -657,7 +648,6 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
 	ep->ze_laddr = 0;
 
-	printf("GIVING DIALER GOOD PIPE!\n");
 	nni_aio_finish_pipe(ep->ze_creq_aio, p);
 }
 
@@ -682,7 +672,6 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// If we already have created a pipe for this connection
 	// then just reply the conn ack.
 	if ((nni_idhash_find(ztn->zn_peers, raddr, (void **) &p)) == 0) {
-		printf("WE ALREADY HAVE A PIPE!\n");
 		zt_pipe_send_conn_ack(p);
 		return;
 	}
@@ -692,14 +681,12 @@ zt_ep_recv_conn_req(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	// this one.
 	for (i = ep->ze_creq_tail; i != ep->ze_creq_head; i++) {
 		if (ep->ze_creqs[i % zt_listenq].cr_raddr == raddr) {
-			printf("THAT ONE IS PENDING!\n");
 			return;
 		}
 	}
 	// We may already have filled our listenq, in which case we just drop.
 	if ((ep->ze_creq_tail + zt_listenq) == ep->ze_creq_head) {
 		// We have taken as many as we can, so just drop it.
-		printf("LISTENQ FULL\n");
 		return;
 	}
 
@@ -788,6 +775,18 @@ zt_ep_virtual_recv(
 }
 
 static void
+zt_pipe_close_err(zt_pipe *p, int err, uint8_t code, const char *msg)
+{
+	nni_aio *aio;
+	if ((aio = p->zp_user_rxaio) != NULL) {
+		p->zp_user_rxaio = NULL;
+		nni_aio_finish_error(aio, err);
+	}
+	p->zp_closed = 1;
+	zt_pipe_send_err(p, code, msg);
+}
+
+static void
 zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 {
 	nni_aio *    aio;
@@ -800,18 +799,11 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 	int          slot;
 	uint8_t      bit;
 	uint8_t *    body;
-	int          rv;
 
 	if (len < zt_size_data) {
 		// Runt frame.  Drop it and close pipe with a protocol error.
-		if ((aio = p->zp_user_rxaio) != NULL) {
-			p->zp_user_rxaio = NULL;
-			p->zp_closed     = 1;
-			// XXX: send an error to other side..
-			// XXX: zt_pipe_send_error(p, protoocol....).
-			nni_aio_finish_error(aio, NNG_EPROTO);
-			return;
-		}
+		zt_pipe_close_err(p, NNG_EPROTO, zt_err_proto, "Runt frame");
+		return;
 	}
 
 	NNI_GET16(data + zt_offset_data_id, msgid);
@@ -826,7 +818,11 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 	// more than a fragment, since the final fragment may be shorter,
 	// and we won't know that until we receive it.
 	if ((nfrags * fragsz) >= (p->zp_rcvmax + fragsz)) {
-		// XXX: zt_pipe_send_error(p, emsgtoobig);
+		// Discard, as the forwarder might be on the other side
+		// of a device. This is gentler than just shutting the pipe
+		// down.  Sending a remote error might be polite, but since
+		// most peers will close the pipe on such an error, we
+		// simply silent discard it.
 		return;
 	}
 
@@ -859,9 +855,9 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 		// not be first fragment for message!)
 		zt_fraglist_clear(fl);
 
-		rv = nni_msg_alloc(&fl->fl_msg, nfrags * fragsz);
-		if (rv != 0) {
-			// XXX: out of memory, close the pipe?
+		if (nni_msg_alloc(&fl->fl_msg, nfrags * fragsz) != 0) {
+			// Out of memory.  We don't close the pipe, but
+			// just fail to receive the message.  Bump a stat?
 			return;
 		}
 
@@ -878,7 +874,8 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 	    (fragno >= nfrags) || (fragsz == 0) || (nfrags == 0) ||
 	    ((fragno != (nfrags - 1)) && (len != fragsz))) {
 		// Protocol error, message parameters changed.
-		// zt_pipe_send_error(p, bad message);
+		zt_pipe_close_err(
+		    p, NNG_EPROTO, zt_err_proto, "Invalid message parameters");
 		zt_fraglist_clear(fl);
 		return;
 	}
@@ -900,7 +897,7 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 		if (nni_msg_len(fl->fl_msg) > p->zp_rcvmax) {
 			// Strict enforcement of max recv.
 			zt_fraglist_clear(fl);
-			// XXX: zt_pipe_send_error(p, emsgsize);
+			// Just discard the message.
 			return;
 		}
 	}
@@ -920,14 +917,26 @@ static void
 zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
 {
 	nni_aio *aio;
-	printf("REMOTE DISCONNECT!\n");
 	// NB: lock held already.
-	// We don't bother to check the length... we're going to
-	// disconnect anyway.
+	// Don't bother to check the length, going to disconnect anyway.
 	if ((aio = p->zp_user_rxaio) != NULL) {
 		p->zp_user_rxaio = NULL;
 		p->zp_closed     = 1;
 		nni_aio_finish_error(aio, NNG_ECLOSED);
+	}
+}
+
+static void
+zt_pipe_recv_error(zt_pipe *p, const uint8_t *data, size_t len)
+{
+	nni_aio *aio;
+
+	// Perhaps we should log an error message, but at the end of
+	// the day, the details are just not that interesting.
+	if ((aio = p->zp_user_rxaio) != NULL) {
+		p->zp_user_rxaio = NULL;
+		p->zp_closed     = 1;
+		nni_aio_finish_error(aio, NNG_ETRANERR);
 	}
 }
 
@@ -937,13 +946,19 @@ zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
 static void
 zt_pipe_virtual_recv(zt_pipe *p, uint8_t op, const uint8_t *data, size_t len)
 {
-	printf("PIPE VIRTUAL RECV!\n");
+	// We got data, so update our recv time.
+	p->zp_last_recv = nni_clock();
+	p->zp_ping_try  = 0;
+
 	switch (op) {
 	case zt_op_data:
 		zt_pipe_recv_data(p, data, len);
 		return;
 	case zt_op_disc_req:
 		zt_pipe_recv_disc_req(p, data, len);
+		return;
+	case zt_op_error:
+		zt_pipe_recv_error(p, data, len);
 		return;
 	}
 }
@@ -967,7 +982,6 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 	uint64_t       raddr;
 	uint64_t       laddr;
 
-	printf("VIRTUAL NET FRAME RECVD\n");
 	if ((ethertype != zt_ethertype) || (len < zt_size_headers) ||
 	    (data[zt_offset_flags] != 0) || (data[zt_offset_zero1] != 0) ||
 	    (data[zt_offset_zero2] != 0)) {
@@ -1032,8 +1046,8 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 	case zt_op_data:
 	case zt_op_ping_req:
 	case zt_op_conn_ack:
-		zt_send_err(
-		    ztn, nwid, raddr, laddr, zt_err_notconn, "Not connected");
+		zt_send_err(ztn, nwid, raddr, laddr, zt_err_notconn,
+		    "Connection not found");
 		break;
 	case zt_op_error:
 	case zt_op_ping_ack:
@@ -1048,27 +1062,20 @@ static void
 zt_event_cb(ZT_Node *node, void *userptr, void *thr, enum ZT_Event event,
     const void *payload)
 {
+	NNI_ARG_UNUSED(node);
+	NNI_ARG_UNUSED(userptr);
+	NNI_ARG_UNUSED(thr);
+
 	switch (event) {
-	case ZT_EVENT_ONLINE:
-		printf("EVENT ONLINE!\n");
-		break;
-	case ZT_EVENT_UP:
-		printf("EVENT UP!\n");
-		break;
-	case ZT_EVENT_DOWN:
-		printf("EVENT DOWN!\n");
-		break;
-	case ZT_EVENT_OFFLINE:
-		printf("EVENT OFFLINE!\n");
-		break;
-	case ZT_EVENT_TRACE:
+	case ZT_EVENT_ONLINE:  // Connected to the virtual net.
+	case ZT_EVENT_UP:      // Node initialized (may not be connected).
+	case ZT_EVENT_DOWN:    // Teardown of the node.
+	case ZT_EVENT_OFFLINE: // Removal of the node from the net.
+	case ZT_EVENT_TRACE:   // Local trace events.
 		// printf("TRACE: %s\n", (const char *) payload);
 		break;
-	case ZT_EVENT_REMOTE_TRACE:
-		printf("REMOTE TRACE\n");
-		break;
+	case ZT_EVENT_REMOTE_TRACE: // Remote trace, not supported.
 	default:
-		printf("OTHER EVENT %d\n", event);
 		break;
 	}
 }
@@ -1263,8 +1270,6 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 	char *               buf;
 	zt_send_hdr *        hdr;
 
-	// char                 abuf[64];
-
 	NNI_ARG_UNUSED(thr);
 	NNI_ARG_UNUSED(socket);
 	NNI_ARG_UNUSED(ttl);
@@ -1279,9 +1284,6 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 		addr.s_un.s_in.sa_addr   = sin->sin_addr.s_addr;
 		udp                      = ztn->zn_udp4;
 		port                     = htons(sin->sin_port);
-		// XXX:
-		// inet_ntop(AF_INET, &sin->sin_addr, abuf,
-		// sizeof(abuf));
 		break;
 	case AF_INET6:
 		addr.s_un.s_in6.sa_family = NNG_AF_INET6;
@@ -1289,9 +1291,6 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 		udp                       = ztn->zn_udp6;
 		port                      = htons(sin6->sin6_port);
 		memcpy(addr.s_un.s_in6.sa_addr, sin6->sin6_addr.s6_addr, 16);
-		// XXX:
-		// inet_ntop(AF_INET6, &sin6->sin6_addr, abuf,
-		// sizeof(abuf));
 		break;
 	default:
 		// No way to understand the address.
@@ -1320,10 +1319,8 @@ zt_wire_packet_send(ZT_Node *node, void *userptr, void *thr, int64_t socket,
 	aio->a_iov[0].iov_buf = buf;
 	aio->a_iov[0].iov_len = len;
 
-	// printf("SENDING UDP FRAME TO %s %d\n", abuf, port);
 	// This should be non-blocking/best-effort, so while
-	// not great that we're holding the lock, also not
-	// tragic.
+	// not great that we're holding the lock, also not tragic.
 	nni_aio_set_synch(aio);
 	nni_plat_udp_send(udp, aio);
 
@@ -1783,16 +1780,13 @@ static void
 zt_pipe_cancel_recv(nni_aio *aio, int rv)
 {
 	zt_pipe *p = aio->a_prov_data;
-	printf("CANCEL RECV START\n");
 	nni_mtx_lock(&zt_lk);
 	if (p->zp_user_rxaio != aio) {
 		nni_mtx_unlock(&zt_lk);
-		printf("NOT OUR RECV TO CANCEL\n");
 	}
 	p->zp_user_rxaio = NULL;
 	nni_mtx_unlock(&zt_lk);
 	nni_aio_finish_error(aio, rv);
-	printf("CANCEL RECV DONE\n");
 }
 
 static void
@@ -2230,7 +2224,6 @@ zt_ep_doaccept(zt_ep *ep)
 		p->zp_peer = creq.cr_proto;
 
 		zt_pipe_send_conn_ack(p);
-		printf("FINISHING WITH A GOOD PIPE!\n");
 		nni_aio_finish_pipe(aio, p);
 	}
 }

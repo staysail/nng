@@ -16,13 +16,19 @@
 
 #include "core/nng_impl.h"
 
-const char *nng_opt_zt_home = "zt:home";
-const char *nng_opt_zt_nwid = "zt:nwid";
-const char *nng_opt_zt_node = "zt:node";
+const char *nng_opt_zt_home       = "zt:home";
+const char *nng_opt_zt_nwid       = "zt:nwid";
+const char *nng_opt_zt_node       = "zt:node";
+const char *nng_opt_zt_local_port = "zt:local-port";
+const char *nng_opt_zt_ping_time  = "zt:ping-time";
+const char *nng_opt_zt_ping_count = "zt:ping-count";
 
-int nng_optid_zt_home = -1;
-int nng_optid_zt_nwid = -1;
-int nng_optid_zt_node = -1;
+int nng_optid_zt_home       = -1;
+int nng_optid_zt_nwid       = -1;
+int nng_optid_zt_node       = -1;
+int nng_optid_zt_ping_time  = -1;
+int nng_optid_zt_ping_count = -1;
+int nng_optid_zt_local_port = -1;
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -98,6 +104,8 @@ enum zt_tunables {
 	zt_udp_sendq     = 16,               // outgoing UDP queue length
 	zt_recvq         = 2,                // max pending recv (per pipe)
 	zt_recv_stale    = 1000000,          // frags older than are stale
+	zt_ping_time     = 60000000,         // if no traffic, ping time (usec)
+	zt_ping_count    = 5,                // max ping attempts before close
 };
 
 enum zt_op_codes {
@@ -105,8 +113,8 @@ enum zt_op_codes {
 	zt_op_conn_req = 0x10, // connect request
 	zt_op_conn_ack = 0x12, // connect accepted
 	zt_op_disc_req = 0x20, // disconnect request (no ack)
-	zt_op_ping_req = 0x30, // ping request
-	zt_op_ping_ack = 0x32, // ping response
+	zt_op_ping     = 0x30, // ping request
+	zt_op_pong     = 0x32, // ping response
 	zt_op_error    = 0x40, // error response
 };
 
@@ -131,8 +139,8 @@ enum zt_offsets {
 	zt_size_conn_req      = 0x0E, // size of conn_req (connect request)
 	zt_size_conn_ack      = 0x0E, // size of conn_ack (connect reply)
 	zt_size_disc_req      = 0x0C, // size of disc_req (disconnect)
-	zt_size_ping_req      = 0x0C, // size of ping request
-	zt_size_ping_ack      = 0x0C, // size of ping reply
+	zt_size_ping          = 0x0C, // size of ping request
+	zt_size_pong          = 0x0C, // size of ping reply
 	zt_size_data          = 0x14, // size of data message (w/o payload)
 };
 
@@ -205,9 +213,11 @@ struct zt_pipe {
 	int           zp_closed;
 	nni_aio *     zp_user_rxaio;
 	nni_time      zp_last_recv;
-	int           zp_ping_try;
 	zt_fraglist   zp_recvq[zt_recvq];
-	nni_aio *     zp_pngaio;
+	int           zp_ping_try;
+	int           zp_ping_count;
+	nni_duration  zp_ping_time;
+	nni_aio *     zp_ping_aio;
 };
 
 typedef struct zt_creq zt_creq;
@@ -235,6 +245,8 @@ struct zt_ep {
 	nni_list      ze_aios;
 	int           ze_maxmtu;
 	int           ze_phymtu;
+	int           ze_ping_count;
+	nni_duration  ze_ping_time;
 
 	// Incoming connection requests (server only).  We only
 	// only have "accepted" requests -- that is we won't have an
@@ -260,9 +272,9 @@ struct zt_ep {
 //
 // This will have a detrimental impact on performance, but to be completely
 // honest we don't think anyone will be using the ZeroTier transport in
-// excessively performance critical applications; scalability may become
-// a factor for large servers sitting in a ZeroTier hub situation.  (Then
-// again, since only the zerotier procesing is single threaded, it may not
+// performance critical applications; scalability may become a factor for
+// large servers sitting in a ZeroTier hub situation.  (Then again, since
+// only the zerotier procesing is single threaded, it may not
 // be that much of a bottleneck -- really depends on how expensive these
 // operations are.  We can use lockstat or other lock-hotness tools to
 // check for this later.)
@@ -275,6 +287,7 @@ static void zt_ep_conn_req_cb(void *);
 static void zt_ep_doaccept(zt_ep *);
 static void zt_pipe_dorecv(zt_pipe *);
 static int  zt_pipe_init(zt_pipe **, zt_ep *, uint64_t, uint64_t);
+static void zt_pipe_ping_cb(void *);
 static void zt_fraglist_clear(zt_fraglist *);
 static void zt_fraglist_free(zt_fraglist *);
 
@@ -585,6 +598,24 @@ zt_pipe_send_disc_req(zt_pipe *p)
 }
 
 static void
+zt_pipe_send_ping(zt_pipe *p)
+{
+	uint8_t data[zt_size_ping];
+
+	zt_send(p->zp_ztn, p->zp_nwid, zt_op_ping, p->zp_raddr, p->zp_laddr,
+	    data, sizeof(data));
+}
+
+static void
+zt_pipe_send_pong(zt_pipe *p)
+{
+	uint8_t data[zt_size_ping];
+
+	zt_send(p->zp_ztn, p->zp_nwid, zt_op_pong, p->zp_raddr, p->zp_laddr,
+	    data, sizeof(data));
+}
+
+static void
 zt_pipe_send_conn_ack(zt_pipe *p)
 {
 	uint8_t data[zt_size_conn_ack];
@@ -782,8 +813,13 @@ zt_pipe_close_err(zt_pipe *p, int err, uint8_t code, const char *msg)
 		p->zp_user_rxaio = NULL;
 		nni_aio_finish_error(aio, err);
 	}
+	if ((aio = p->zp_ping_aio) != NULL) {
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+	}
 	p->zp_closed = 1;
-	zt_pipe_send_err(p, code, msg);
+	if (msg != NULL) {
+		zt_pipe_send_err(p, code, msg);
+	}
 }
 
 static void
@@ -914,6 +950,28 @@ zt_pipe_recv_data(zt_pipe *p, const uint8_t *data, size_t len)
 }
 
 static void
+zt_pipe_recv_ping(zt_pipe *p, const uint8_t *data, size_t len)
+{
+	NNI_ARG_UNUSED(data);
+
+	if (len != zt_size_ping) {
+		zt_pipe_send_err(p, zt_err_proto, "Incorrect ping size");
+		return;
+	}
+	zt_pipe_send_pong(p);
+}
+
+static void
+zt_pipe_recv_pong(zt_pipe *p, const uint8_t *data, size_t len)
+{
+	NNI_ARG_UNUSED(data);
+
+	if (len != zt_size_pong) {
+		zt_pipe_send_err(p, zt_err_proto, "Incorrect pong size");
+	}
+}
+
+static void
 zt_pipe_recv_disc_req(zt_pipe *p, const uint8_t *data, size_t len)
 {
 	nni_aio *aio;
@@ -956,6 +1014,12 @@ zt_pipe_virtual_recv(zt_pipe *p, uint8_t op, const uint8_t *data, size_t len)
 		return;
 	case zt_op_disc_req:
 		zt_pipe_recv_disc_req(p, data, len);
+		return;
+	case zt_op_ping:
+		zt_pipe_recv_ping(p, data, len);
+		return;
+	case zt_op_pong:
+		zt_pipe_recv_pong(p, data, len);
 		return;
 	case zt_op_error:
 		zt_pipe_recv_error(p, data, len);
@@ -1044,13 +1108,13 @@ zt_virtual_recv(ZT_Node *node, void *userptr, void *thr, uint64_t nwid,
 		    "Connection refused");
 		return;
 	case zt_op_data:
-	case zt_op_ping_req:
+	case zt_op_ping:
 	case zt_op_conn_ack:
 		zt_send_err(ztn, nwid, raddr, laddr, zt_err_notconn,
 		    "Connection not found");
 		break;
 	case zt_op_error:
-	case zt_op_ping_ack:
+	case zt_op_pong:
 	case zt_op_disc_req:
 	default:
 		// Just drop these.
@@ -1520,6 +1584,12 @@ zt_chkopt(int opt, const void *dat, size_t sz)
 		// checks? home path is not null terminated
 		return (0);
 	}
+	if (opt == nng_optid_zt_ping_count) {
+		return (nni_chkopt_int(dat, sz, 0, 1000000));
+	}
+	if (opt == nng_optid_zt_ping_time) {
+		return (nni_chkopt_usec(dat, sz));
+	}
 	return (NNG_ENOTSUP);
 }
 
@@ -1532,7 +1602,13 @@ zt_tran_init(void)
 	    ((rv = nni_option_register(nng_opt_zt_node, &nng_optid_zt_node)) !=
 	        0) ||
 	    ((rv = nni_option_register(nng_opt_zt_nwid, &nng_optid_zt_nwid)) !=
-	        0)) {
+	        0) ||
+	    ((rv = nni_option_register(
+	          nng_opt_zt_local_port, &nng_optid_zt_local_port)) != 0) ||
+	    ((rv = nni_option_register(
+	          nng_opt_zt_ping_count, &nng_optid_zt_ping_count)) != 0) ||
+	    ((rv = nni_option_register(
+	          nng_opt_zt_ping_time, &nng_optid_zt_ping_time)) != 0)) {
 		return (rv);
 	}
 	nni_mtx_init(&zt_lk);
@@ -1543,9 +1619,11 @@ zt_tran_init(void)
 static void
 zt_tran_fini(void)
 {
-	nng_optid_zt_home = -1;
-	nng_optid_zt_nwid = -1;
-	nng_optid_zt_node = -1;
+	nng_optid_zt_home       = -1;
+	nng_optid_zt_nwid       = -1;
+	nng_optid_zt_node       = -1;
+	nng_optid_zt_ping_count = -1;
+	nng_optid_zt_ping_time  = -1;
 	zt_node *ztn;
 
 	nni_mtx_lock(&zt_lk);
@@ -1593,6 +1671,8 @@ zt_pipe_fini(void *arg)
 	zt_pipe *p   = arg;
 	zt_node *ztn = p->zp_ztn;
 
+	nni_aio_fini(p->zp_ping_aio);
+
 	// This tosses the connection details and all state.
 	nni_mtx_lock(&zt_lk);
 	nni_idhash_remove(ztn->zn_ports, p->zp_laddr & zt_port_mask);
@@ -1628,8 +1708,10 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 	p->zp_raddr      = raddr;
 	p->zp_mtu        = ep->ze_phymtu;
 	p->zp_rcvmax     = ep->ze_rcvmax;
+	p->zp_ping_count = ep->ze_ping_count;
+	p->zp_ping_time  = ep->ze_ping_time;
 	p->zp_next_msgid = (uint16_t) nni_random();
-
+	p->zp_ping_try   = 0;
 	if (laddr == 0) {
 		// Locate a suitable port number.
 		if ((rv = nni_idhash_alloc(ztn->zn_ports, &port, p)) != 0) {
@@ -1649,7 +1731,8 @@ zt_pipe_init(zt_pipe **pipep, zt_ep *ep, uint64_t raddr, uint64_t laddr)
 	}
 
 	if (((rv = nni_idhash_insert(ztn->zn_pipes, p->zp_laddr, p)) != 0) ||
-	    ((rv = nni_idhash_insert(ztn->zn_peers, p->zp_raddr, p)) != 0)) {
+	    ((rv = nni_idhash_insert(ztn->zn_peers, p->zp_raddr, p)) != 0) ||
+	    ((rv = nni_aio_init(&p->zp_ping_aio, zt_pipe_ping_cb, p)) != 0)) {
 		zt_pipe_fini(p);
 	}
 
@@ -1879,14 +1962,64 @@ zt_pipe_getopt(void *arg, int option, void *buf, size_t *szp)
 }
 
 static void
+zt_pipe_cancel_ping(nni_aio *aio, int rv)
+{
+	nni_aio_finish_error(aio, rv);
+}
+
+static void
+zt_pipe_ping_cb(void *arg)
+{
+	zt_pipe *p   = arg;
+	nni_aio *aio = p->zp_ping_aio;
+
+	nni_mtx_lock(&zt_lk);
+	if (p->zp_closed || aio == NULL || (p->zp_ping_count == 0) ||
+	    (p->zp_ping_time == NNI_TIME_NEVER) ||
+	    (p->zp_ping_time == NNI_TIME_ZERO)) {
+		nni_mtx_unlock(&zt_lk);
+		return;
+	}
+	if (nni_aio_result(aio) != NNG_ETIMEDOUT) {
+		nni_mtx_unlock(&zt_lk);
+		return;
+	}
+	if (p->zp_ping_try < p->zp_ping_count) {
+		nni_time now = nni_clock();
+		nni_aio_set_timeout(aio, now + p->zp_ping_time);
+		if (now > (p->zp_last_recv + p->zp_ping_time)) {
+			// We have to send a ping to keep the session up.
+			if (nni_aio_start(aio, zt_pipe_cancel_ping, p) == 0) {
+				p->zp_ping_try++;
+				zt_pipe_send_ping(p);
+			}
+		} else {
+			// We still need the timer to wake us up in case
+			// we haven't seen traffic for a while.
+			nni_aio_start(aio, zt_pipe_cancel_ping, p);
+		}
+	} else {
+		// Close the pipe, but no need to send a reason to the
+		// peer, it is already AFK.
+		zt_pipe_close_err(p, NNG_ECLOSED, 0, NULL);
+	}
+	nni_mtx_unlock(&zt_lk);
+}
+
+static void
 zt_pipe_start(void *arg, nni_aio *aio)
 {
 	zt_pipe *p = arg;
 
 	nni_mtx_lock(&zt_lk);
-	// XXX: send a gratuitous ping, and start the ping
-	// interval timer.
-	// zt_pipe_send_ping(p);
+	// send a gratuitous ping, and start the ping interval timer.
+	if ((p->zp_ping_count > 0) && (p->zp_ping_time != NNI_TIME_ZERO) &&
+	    (p->zp_ping_time != NNI_TIME_NEVER) && (p->zp_ping_aio != NULL)) {
+		p->zp_ping_try = 0;
+		nni_aio_set_timeout(aio, nni_clock() + p->zp_ping_time);
+		nni_aio_start(p->zp_ping_aio, zt_pipe_cancel_ping, p);
+		zt_pipe_send_ping(p);
+	}
 	nni_aio_finish(aio, 0, 0);
 	nni_mtx_unlock(&zt_lk);
 }
@@ -1969,12 +2102,14 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 	// dialers, but is not used at all for listeners.  (We
 	// have no notion of binding to different node
 	// addresses.)
-	ep->ze_mode   = mode;
-	ep->ze_maxmtu = ZT_MAX_MTU;
-	ep->ze_phymtu = ZT_MIN_MTU;
-	ep->ze_aio    = NULL;
-	ep->ze_proto  = nni_sock_proto(sock);
-	sz            = sizeof(ep->ze_url);
+	ep->ze_mode       = mode;
+	ep->ze_maxmtu     = ZT_MAX_MTU;
+	ep->ze_phymtu     = ZT_MIN_MTU;
+	ep->ze_aio        = NULL;
+	ep->ze_ping_count = zt_ping_count;
+	ep->ze_ping_time  = zt_ping_time;
+	ep->ze_proto      = nni_sock_proto(sock);
+	sz                = sizeof(ep->ze_url);
 
 	nni_aio_list_init(&ep->ze_aios);
 
@@ -2373,6 +2508,15 @@ zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 		}
 		nni_mtx_unlock(&zt_lk);
 		rv = 0;
+	} else if (opt == nng_optid_zt_ping_count) {
+		nni_mtx_lock(&zt_lk);
+		rv =
+		    nni_setopt_int(&ep->ze_ping_count, data, size, 0, 1000000);
+		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_ping_time) {
+		nni_mtx_lock(&zt_lk);
+		rv = nni_setopt_usec(&ep->ze_ping_time, data, size);
+		nni_mtx_unlock(&zt_lk);
 	}
 	return (rv);
 }
@@ -2385,7 +2529,7 @@ zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 
 	if (opt == nng_optid_recvmaxsz) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_size(&ep->ze_rcvmax, data, sizep);
+		rv = nni_getopt_size(ep->ze_rcvmax, data, sizep);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_home) {
 		nni_mtx_lock(&zt_lk);
@@ -2398,6 +2542,19 @@ zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
 	} else if (opt == nng_optid_zt_nwid) {
 		nni_mtx_lock(&zt_lk);
 		rv = nni_getopt_u64(ep->ze_nwid, data, sizep);
+		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_ping_count) {
+		nni_mtx_lock(&zt_lk);
+		rv = nni_getopt_int(ep->ze_ping_count, data, sizep);
+		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_ping_time) {
+		nni_mtx_lock(&zt_lk);
+		rv = nni_getopt_usec(ep->ze_ping_time, data, sizep);
+		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_local_port) {
+		nni_mtx_lock(&zt_lk);
+		rv = nni_getopt_int(
+		    (int) (ep->ze_laddr & zt_port_mask), data, sizep);
 		nni_mtx_unlock(&zt_lk);
 	}
 	return (rv);

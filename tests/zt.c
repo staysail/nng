@@ -75,8 +75,6 @@ TestMain("ZeroTier Transport", {
 			       strlen(path1) + 1) == 0);
 
 			So(nng_listener_start(l, 0) == 0);
-
-			nng_usleep(5000000);
 		})
 	});
 
@@ -156,6 +154,8 @@ TestMain("ZeroTier Transport", {
 		So(nng_pair_open(&s2) == 0);
 		Reset({
 			nng_close(s1);
+			// This sleep allows us to ensure disconnect
+			// messages work.
 			nng_usleep(1000000);
 			nng_close(s2);
 		});

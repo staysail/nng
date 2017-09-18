@@ -15,6 +15,8 @@ extern int         nng_zt_register(void);
 extern const char *nng_opt_zt_home;
 extern int         nng_optid_zt_home;
 extern int         nng_optid_zt_node;
+extern int         nng_optid_zt_network_status;
+extern int         nng_optid_zt_network_name;
 
 // zerotier tests.
 
@@ -121,6 +123,15 @@ TestMain("ZeroTier Transport", {
 		    0);
 		So(node1 != 0);
 
+		Convey("Network name option works", {
+			char   name[NNG_MAXADDRLEN];
+			size_t namesz;
+
+			namesz = sizeof(name);
+			So(nng_listener_getopt(l, nng_optid_zt_network_name,
+			       name, &namesz) == 0);
+			printf("*** NAME IS [%s]\n", name);
+		});
 		Convey("Connection refused works", {
 			snprintf(addr, sizeof(addr), "zt://" NWID "/%llx:%u",
 			    node1, 42);

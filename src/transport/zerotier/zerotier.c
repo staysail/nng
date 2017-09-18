@@ -16,25 +16,38 @@
 
 #include "core/nng_impl.h"
 
-const char *nng_opt_zt_home       = "zt:home";
-const char *nng_opt_zt_nwid       = "zt:nwid";
-const char *nng_opt_zt_node       = "zt:node";
-const char *nng_opt_zt_local_port = "zt:local-port";
-const char *nng_opt_zt_ping_time  = "zt:ping-time";
-const char *nng_opt_zt_ping_count = "zt:ping-count";
-
-int nng_optid_zt_home       = -1;
-int nng_optid_zt_nwid       = -1;
-int nng_optid_zt_node       = -1;
-int nng_optid_zt_ping_time  = -1;
-int nng_optid_zt_ping_count = -1;
-int nng_optid_zt_local_port = -1;
-
 #ifndef _WIN32
 #include <unistd.h>
 #endif
 
 #include <ZeroTierOne.h>
+
+const char *nng_opt_zt_home         = "zt:home";
+const char *nng_opt_zt_nwid         = "zt:nwid";
+const char *nng_opt_zt_node         = "zt:node";
+const char *nng_opt_zt_status       = "zt:status";
+const char *nng_opt_zt_network_name = "zt:network-name";
+const char *nng_opt_zt_local_port   = "zt:local-port";
+const char *nng_opt_zt_ping_time    = "zt:ping-time";
+const char *nng_opt_zt_ping_count   = "zt:ping-count";
+
+int nng_optid_zt_home         = -1;
+int nng_optid_zt_nwid         = -1;
+int nng_optid_zt_node         = -1;
+int nng_optid_zt_status       = -1;
+int nng_optid_zt_network_name = -1;
+int nng_optid_zt_ping_time    = -1;
+int nng_optid_zt_ping_count   = -1;
+int nng_optid_zt_local_port   = -1;
+
+// These values are supplied to help folks checking status.  They are the
+// return values from nng_optid_zt_status.
+int nng_zt_status_configuring = ZT_NETWORK_STATUS_REQUESTING_CONFIGURATION;
+int nng_zt_status_ok          = ZT_NETWORK_STATUS_OK;
+int nng_zt_status_denied      = ZT_NETWORK_STATUS_ACCESS_DENIED;
+int nng_zt_status_notfound    = ZT_NETWORK_STATUS_NOT_FOUND;
+int nng_zt_status_error       = ZT_NETWORK_STATUS_PORT_ERROR;
+int nng_zt_status_obsolete    = ZT_NETWORK_STATUS_CLIENT_TOO_OLD;
 
 // ZeroTier Transport.  This sits on the ZeroTier L2 network, which itself
 // is implemented on top of UDP.  This requires the 3rd party
@@ -57,11 +70,10 @@ int nng_optid_zt_local_port = -1;
 // This transport is highly experimental.
 
 // ZeroTier and UDP are connectionless, but nng is designed around
-// connection oriented paradigms.  Therefore we will emulate a connection
-// as follows:
-//
-// xxx...
-//
+// connection oriented paradigms.  An "unreliable" connection is created
+// on top using our own network protocol.  The details of this are
+// documented in the RFC.
+
 // Every participant has an "address", which is a 64-bit value constructed
 // using the ZT node number in the upper 40-bits, and a 24-bit port number
 // in the lower bits.  We elect to operate primarily on these addresses,
@@ -1604,6 +1616,10 @@ zt_tran_init(void)
 	    ((rv = nni_option_register(nng_opt_zt_nwid, &nng_optid_zt_nwid)) !=
 	        0) ||
 	    ((rv = nni_option_register(
+	          nng_opt_zt_status, &nng_optid_zt_status)) != 0) ||
+	    ((rv = nni_option_register(nng_opt_zt_network_name,
+	          &nng_optid_zt_network_name)) != 0) ||
+	    ((rv = nni_option_register(
 	          nng_opt_zt_local_port, &nng_optid_zt_local_port)) != 0) ||
 	    ((rv = nni_option_register(
 	          nng_opt_zt_ping_count, &nng_optid_zt_ping_count)) != 0) ||
@@ -1956,9 +1972,65 @@ zt_pipe_peer(void *arg)
 }
 
 static int
+zt_getopt_status(zt_node *ztn, uint64_t nwid, void *buf, size_t *szp)
+{
+	ZT_VirtualNetworkConfig *vcfg;
+	int                      status;
+	int                      rv;
+
+	nni_mtx_lock(&zt_lk);
+	vcfg = ZT_Node_networkConfig(ztn->zn_znode, nwid);
+	if (vcfg == NULL) {
+		nni_mtx_unlock(&zt_lk);
+		return (NNG_ECLOSED);
+	}
+	status = vcfg->status;
+	ZT_Node_freeQueryResult(ztn->zn_znode, vcfg);
+	nni_mtx_unlock(&zt_lk);
+
+	return (nni_getopt_int(status, buf, szp));
+}
+
+static int
+zt_getopt_network_name(zt_node *ztn, uint64_t nwid, void *buf, size_t *szp)
+{
+	ZT_VirtualNetworkConfig *vcfg;
+	int                      status;
+	int                      rv;
+
+	nni_mtx_lock(&zt_lk);
+	vcfg = ZT_Node_networkConfig(ztn->zn_znode, nwid);
+	if (vcfg == NULL) {
+		nni_mtx_unlock(&zt_lk);
+		return (NNG_ECLOSED);
+	}
+	rv = nni_getopt_str(vcfg->name, buf, szp);
+	ZT_Node_freeQueryResult(vcfg, ztn->zn_znode);
+	nni_mtx_unlock(&zt_lk);
+
+	return (rv);
+}
+
+static int
 zt_pipe_getopt(void *arg, int option, void *buf, size_t *szp)
 {
-	return (NNG_ENOTSUP);
+	zt_pipe *p = arg;
+	int      rv;
+
+	if (option == nng_optid_recvmaxsz) {
+		rv = nni_getopt_size(p->zp_rcvmax, buf, szp);
+	} else if (option == nng_optid_zt_nwid) {
+		rv = nni_getopt_u64(p->zp_nwid, buf, szp);
+	} else if (option == nng_optid_zt_node) {
+		rv = nni_getopt_u64(p->zp_laddr >> 24, buf, szp);
+	} else if (option == nng_optid_zt_status) {
+		rv = zt_getopt_status(p->zp_ztn, p->zp_nwid, buf, szp);
+	} else if (option == nng_optid_zt_network_name) {
+		rv = zt_getopt_network_name(p->zp_ztn, p->zp_nwid, buf, szp);
+	} else {
+		rv = NNG_ENOTSUP;
+	}
+	return (rv);
 }
 
 static void
@@ -2522,40 +2594,45 @@ zt_ep_setopt(void *arg, int opt, const void *data, size_t size)
 }
 
 static int
-zt_ep_getopt(void *arg, int opt, void *data, size_t *sizep)
+zt_ep_getopt(void *arg, int opt, void *data, size_t *szp)
 {
 	zt_ep *ep = arg;
 	int    rv = NNG_ENOTSUP;
 
 	if (opt == nng_optid_recvmaxsz) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_size(ep->ze_rcvmax, data, sizep);
+		rv = nni_getopt_size(ep->ze_rcvmax, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_home) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_str(ep->ze_home, data, sizep);
+		rv = nni_getopt_str(ep->ze_home, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_node) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_u64(ep->ze_ztn->zn_self, data, sizep);
+		rv = nni_getopt_u64(ep->ze_ztn->zn_self, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_nwid) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_u64(ep->ze_nwid, data, sizep);
+		rv = nni_getopt_u64(ep->ze_nwid, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_ping_count) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_int(ep->ze_ping_count, data, sizep);
+		rv = nni_getopt_int(ep->ze_ping_count, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_ping_time) {
 		nni_mtx_lock(&zt_lk);
-		rv = nni_getopt_usec(ep->ze_ping_time, data, sizep);
+		rv = nni_getopt_usec(ep->ze_ping_time, data, szp);
 		nni_mtx_unlock(&zt_lk);
 	} else if (opt == nng_optid_zt_local_port) {
 		nni_mtx_lock(&zt_lk);
 		rv = nni_getopt_int(
-		    (int) (ep->ze_laddr & zt_port_mask), data, sizep);
+		    (int) (ep->ze_laddr & zt_port_mask), data, szp);
 		nni_mtx_unlock(&zt_lk);
+	} else if (opt == nng_optid_zt_network_name) {
+		rv =
+		    zt_getopt_network_name(ep->ze_ztn, ep->ze_nwid, data, szp);
+	} else if (opt == nng_optid_zt_status) {
+		rv = zt_getopt_status(ep->ze_ztn, ep->ze_nwid, data, szp);
 	}
 	return (rv);
 }

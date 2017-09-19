@@ -15,8 +15,9 @@ extern int         nng_zt_register(void);
 extern const char *nng_opt_zt_home;
 extern int         nng_optid_zt_home;
 extern int         nng_optid_zt_node;
-extern int         nng_optid_zt_network_status;
+extern int         nng_optid_zt_status;
 extern int         nng_optid_zt_network_name;
+extern int         nng_zt_status_ok;
 
 // zerotier tests.
 
@@ -123,14 +124,19 @@ TestMain("ZeroTier Transport", {
 		    0);
 		So(node1 != 0);
 
-		Convey("Network name option works", {
+		Convey("Network name & status options work", {
 			char   name[NNG_MAXADDRLEN];
 			size_t namesz;
+			int    status;
 
 			namesz = sizeof(name);
+			nng_usleep(10000000);
 			So(nng_listener_getopt(l, nng_optid_zt_network_name,
 			       name, &namesz) == 0);
-			printf("*** NAME IS [%s]\n", name);
+			So(strcmp(name, "nng_test_open") == 0);
+			So(nng_listener_getopt_int(
+			       l, nng_optid_zt_status, &status) == 0);
+			So(status == nng_zt_status_ok);
 		});
 		Convey("Connection refused works", {
 			snprintf(addr, sizeof(addr), "zt://" NWID "/%llx:%u",

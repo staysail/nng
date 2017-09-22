@@ -302,6 +302,9 @@ static int  zt_pipe_init(zt_pipe **, zt_ep *, uint64_t, uint64_t);
 static void zt_pipe_ping_cb(void *);
 static void zt_fraglist_clear(zt_fraglist *);
 static void zt_fraglist_free(zt_fraglist *);
+static void zt_virtual_recv(ZT_Node *, void *, void *, uint64_t, void **,
+    uint64_t, uint64_t, unsigned int, unsigned int, const void *,
+    unsigned int);
 
 static uint64_t
 zt_now(void)
@@ -384,7 +387,12 @@ zt_node_rcv4_cb(void *arg)
 
 	// Schedule another receive.
 	if (ztn->zn_udp4 != NULL) {
-		aio->a_count = 0;
+		aio->a_niov           = 1;
+		aio->a_iov[0].iov_buf = ztn->zn_rcv4_buf;
+		aio->a_iov[0].iov_len = zt_rcv_bufsize;
+		aio->a_addr           = &ztn->zn_rcv4_addr;
+		aio->a_count          = 0;
+
 		nni_plat_udp_recv(ztn->zn_udp4, aio);
 	}
 	nni_mtx_unlock(&zt_lk);
@@ -428,7 +436,11 @@ zt_node_rcv6_cb(void *arg)
 
 	// Schedule another receive.
 	if (ztn->zn_udp6 != NULL) {
-		aio->a_count = 0;
+		aio->a_niov           = 1;
+		aio->a_iov[0].iov_buf = ztn->zn_rcv6_buf;
+		aio->a_iov[0].iov_len = zt_rcv_bufsize;
+		aio->a_addr           = &ztn->zn_rcv6_addr;
+		aio->a_count          = 0;
 		nni_plat_udp_recv(ztn->zn_udp6, aio);
 	}
 	nni_mtx_unlock(&zt_lk);
@@ -572,6 +584,13 @@ zt_send(zt_node *ztn, uint64_t nwid, uint8_t op, uint64_t raddr,
 	ZT_PUT24(data + zt_offset_dst_port, raddr & zt_port_mask);
 	ZT_PUT24(data + zt_offset_src_port, laddr & zt_port_mask);
 
+	// If we are looping back, bypass ZT.
+	if (srcmac == dstmac) {
+		zt_virtual_recv(ztn->zn_znode, ztn, NULL, nwid, NULL, srcmac,
+		    dstmac, zt_ethertype, 0, data, len);
+		return;
+	}
+
 	(void) ZT_Node_processVirtualNetworkFrame(ztn->zn_znode, NULL, now,
 	    nwid, srcmac, dstmac, zt_ethertype, 0, data, len, &now);
 
@@ -691,7 +710,7 @@ zt_ep_recv_conn_ack(zt_ep *ep, uint64_t raddr, const uint8_t *data, size_t len)
 	nni_idhash_remove(ztn->zn_eps, ep->ze_laddr);
 	ep->ze_laddr = 0;
 
-	nni_aio_finish_pipe(ep->ze_creq_aio, p);
+	nni_aio_finish_pipe(aio, p);
 }
 
 static void
@@ -2005,7 +2024,7 @@ zt_getopt_network_name(zt_node *ztn, uint64_t nwid, void *buf, size_t *szp)
 		return (NNG_ECLOSED);
 	}
 	rv = nni_getopt_str(vcfg->name, buf, szp);
-	ZT_Node_freeQueryResult(vcfg, ztn->zn_znode);
+	ZT_Node_freeQueryResult(ztn->zn_znode, vcfg);
 	nni_mtx_unlock(&zt_lk);
 
 	return (rv);
@@ -2170,10 +2189,9 @@ zt_ep_init(void **epp, const char *url, nni_sock *sock, int mode)
 
 	// URL parsing...
 	// URL is form zt://<nwid>[/<remoteaddr>]:<port>
-	// The <remoteaddr> part is required for remote
-	// dialers, but is not used at all for listeners.  (We
-	// have no notion of binding to different node
-	// addresses.)
+	// The <remoteaddr> part is required for remote  dialers, but is
+	// not used at all for listeners.  (We have no notion of binding
+	// to different node addresses.)
 	ep->ze_mode       = mode;
 	ep->ze_maxmtu     = ZT_MAX_MTU;
 	ep->ze_phymtu     = ZT_MIN_MTU;
@@ -2453,8 +2471,7 @@ zt_ep_conn_req_cancel(nni_aio *aio, int rv)
 {
 	// We don't have much to do here.  The AIO will have been
 	// canceled as a result of the "parent" AIO canceling.
-	zt_ep *ep       = aio->a_prov_data;
-	ep->ze_creq_try = 0;
+	zt_ep *ep = aio->a_prov_data;
 	nni_aio_finish_error(aio, rv);
 }
 
@@ -2496,6 +2513,7 @@ zt_ep_conn_req_cb(void *arg)
 			nni_mtx_unlock(&zt_lk);
 			return;
 		}
+		break;
 	}
 
 	// These are failure modes.  Either we timed out too many
@@ -2520,11 +2538,13 @@ zt_ep_connect(void *arg, nni_aio *aio)
 	// it to the pipe, but this allows us to receive the initial
 	// ack back from the server.  (This gives us an ephemeral
 	// address to work with.)
-
 	nni_mtx_lock(&zt_lk);
 
 	if (nni_aio_start(aio, zt_ep_cancel, ep) == 0) {
 		nni_time now = nni_clock();
+
+		// Clear the port so we get an ephemeral port.
+		ep->ze_laddr &= ~((uint64_t) zt_port_mask);
 
 		if ((rv = zt_ep_bind_locked(ep)) != 0) {
 			nni_aio_finish_error(aio, rv);
@@ -2547,8 +2567,7 @@ zt_ep_connect(void *arg, nni_aio *aio)
 		    ep->ze_creq_aio, zt_ep_conn_req_cancel, ep);
 
 		// We send out the first connect message; it we are not
-		// yet attached to the network the message will be
-		// dropped.
+		// yet attached to the network the message will be dropped.
 		zt_ep_send_conn_req(ep);
 	}
 	nni_mtx_unlock(&zt_lk);

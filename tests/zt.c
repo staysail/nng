@@ -46,8 +46,6 @@ TestMain("ZeroTier Transport", {
 
 	port = 5555;
 
-	atexit(nng_fini);
-
 	Convey("We can register the zero tier transport",
 	    { So(nng_zt_register() == 0); });
 
@@ -197,4 +195,5 @@ TestMain("ZeroTier Transport", {
 
 	trantest_test_all("zt://" NWID "/*:%u");
 
+	nng_fini();
 })

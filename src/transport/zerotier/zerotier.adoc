@@ -1,7 +1,7 @@
 ZeroTier Mapping for Scalability Protocols
 ===========================================
 
-sp-zerotier-mapping-05
+sp-zerotier-mapping-06
 ~~~~~~~~~~~~~~~~~~~~~~
 
 Abstract
@@ -215,11 +215,12 @@ be chosen randomly.)
 
 The responder will acknowledge this by replying with its SP protocol
 ID in the 4-byte payload, using the `CONN-ACK` op.  Additionally,
-the source port number that the responder replies with *MAY* be different
-than the one the intiator requested.  The reason for this is to allow
-a responder to use these port numbers to uniquely identify a new
-conversation.  (This will be the typical case, where an ephemeral port
-number is allocated for the conversation.)
+the source port number that the responder replies with *MUST* be the
+one the intiator requested.
+
+(Responders will identify the session using the initiators chosen
+`source port`, which the initiator *MUST NOT* concurrently use for any
+other sessions.)
 
 Alternatively, a responder *MAY* reject the connection attempt by
 sending a suitably formed ERR message (see below).
@@ -241,7 +242,7 @@ messages for the conversation to the port number supplied by the responder.
 If a `CONN-REQ` frame is received by a responder for a conversation that already
 exists, the responder MUST reply.  Further, the source port it replies with,
 and the SP protocol IDs MUST be identical to what it first sent.  This
-ensures that the `CONN` request is idempotent.
+ensures that the `CONN-REQ` request is idempotent.
 
 DISC messages
 ~~~~~~~~~~~~~

@@ -66,6 +66,7 @@ nni_taskq_thread(void *self)
 				// since the called function has taken control.
 				nni_mtx_unlock(&task->task_mtx);
 			} else {
+				task->task_run  = false;
 				task->task_done = true;
 				nni_cv_wake(&task->task_cv);
 
@@ -170,7 +171,6 @@ nni_task_dispatch(nni_task *task)
 	nni_mtx_lock(&task->task_mtx);
 	task->task_sched = true;
 	task->task_run   = false;
-	task->task_exec  = false;
 	task->task_done  = false;
 	nni_mtx_unlock(&task->task_mtx);
 
@@ -193,7 +193,7 @@ nni_task_exec(nni_task *task)
 		return;
 	}
 	nni_mtx_lock(&task->task_mtx);
-	if (task->task_exec) {
+	if (task->task_exec || task->task_run) {
 		// recursive taskq_exec, run it asynchronously
 		nni_mtx_unlock(&task->task_mtx);
 		nni_task_dispatch(task);
@@ -202,7 +202,6 @@ nni_task_exec(nni_task *task)
 	task->task_exec  = true;
 	task->task_sched = false;
 	task->task_done  = false;
-	task->task_run   = false;
 	nni_mtx_unlock(&task->task_mtx);
 
 	task->task_cb(task->task_arg);

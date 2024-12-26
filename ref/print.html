@@ -32,15 +32,17 @@
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="theme/pagetoc.css">
 
-    </head>
-    <body>
-    <div id="body-container">
+
         <!-- Provide site root to javascript -->
         <script>
             var path_to_root = "";
             var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
         </script>
-
+        <!-- Start loading toc.js asap -->
+        <script src="toc.js"></script>
+    </head>
+    <body>
+    <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
@@ -87,7 +89,7 @@
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
             <!-- populated by js -->
-            <div class="sidebar-scrollbox"></div>
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
                 <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
             </noscript>
@@ -95,8 +97,6 @@
                 <div class="sidebar-resize-indicator"></div>
             </div>
         </nav>
-
-        <script async src="toc.js"></script>
 
         <div id="page-wrapper" class="page-wrapper">
 
@@ -666,6 +666,150 @@ include the <code>nng/nng.h</code> header file like so:</p>
 }
 
 </style>
+<h1 id="initialization--finalization"><a class="header" href="#initialization--finalization">Initialization &amp; Finalization</a></h1>
+<p>This chapter details the function used to initialize
+the library before first use, and the funtion used to
+finalize the library and deallocate any resources used by the library.</p>
+<h2 id="initialization"><a class="header" href="#initialization">Initialization</a></h2>
+<pre><code class="language-c">typedef struct {
+    int16_t num_task_threads;
+    int16_t max_task_threads;
+    int16_t num_expire_threads;
+    int16_t max_expire_threads;
+    int16_t num_poller_threads;
+    int16_t max_poller_threads;
+    int16_t num_resolver_threads;
+} nng_init_params;
+
+extern int nng_init(nng_init_parms *params);
+</code></pre>
+<p>Before using other interfaces in this library, it is necessary to initialize
+the library. The <a name="a001"></a><code>nng_init</code> function performs this initialization.</p>
+<p>The function is idempotent, although on tear down, every call to <code>nng_init</code> must
+be paired with a call to <a href="api//api/init.html#finalization"><code>nng_fini</code></a> or no resources will be released.
+This allows for libraries consuming these interfaces to safely initialize and finalize
+the library without disrupting other consumers in the same process.</p>
+<p>Further, only the first call to this function may have a value of <em>params</em> other than <code>NULL</code>.
+If <em>params</em> is not <code>NULL</code>, and the library has already been intiazed, then <code>nng_init</code> will
+return <a href="api//api/errors.html#NNG_EBUSY"><code>NNG_EBUSY</code></a>.</p>
+<p>In some cases it is desirable to tune certain runtime parameters for the library, which
+can be done by supplying a non-<code>NULL</code> <em>params</em> argument.</p>
+<h3 id="parameters"><a class="header" href="#parameters">Parameters</a></h3>
+<p>The individual fields of the <code>nng_init_params</code> structure can be used to adjust certain
+runtime tunables for the library. There is no guarantee that these tunables are implemented,
+and applications should not depend upon them for correct operation.</p>
+<p>Any member of <code>nng_init_params</code> that is set to zero will be ignored, and any built in default
+will be used instead for that value.</p>
+<div class="mdbook-alerts mdbook-alerts-note">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  note
+</p>
+<p>Applications should make sure that structure is zero initialized before calling <code>nng_init</code>.</p>
+</div>
+<p>The following parameters are present:</p>
+<ul>
+<li>
+<p><code>num_task_threads</code> and <code>max_task_threads</code> <br />
+Configures the number of threads to use for tasks, which are used principally for completion
+callbacks. The maximum value can be used to provide an upper limit while still allowing
+for a dynamically calculated value to be used, as long as it does not exceeed the maximum.</p>
+</li>
+<li>
+<p><code>num_expire_threads</code> and <code>max_expire_threads</code> <br />
+Configures the number of threads used for expiring operations. Using a larger value will
+reduce contention on some common locks, and may improve performance.</p>
+</li>
+<li>
+<p><code>num_poller_threads</code> and <code>max_poller_threads</code> <br />
+Configures the number of threads to be used for performing I/O. Not all configurations support
+changing these values.</p>
+</li>
+<li>
+<p><code>num_resolver_threads</code> <br />
+Changes the number of threads used for asynchronous DNS look ups.</p>
+</li>
+</ul>
+<h2 id="finalization"><a class="header" href="#finalization">Finalization</a></h2>
+<pre><code class="language-c">extern void nng_init(nng_init_parms *params);
+</code></pre>
+<p>When the consumer is ready to deallocate any resoures allocated by the library, it should call
+the <a name="a002"></a><code>nng_fini</code> function. Each call to <code>nng_fini</code> should be paired with an earlier call to
+<a href="api//api/init.html#initialization"><code>nng_init</code></a>.</p>
+<p>After calling <code>nng_fini</code>, the consuming application must not make any other calls to NNG functions,
+except that it may use <code>nng_init</code> to initialize the application for further use.</p>
+<!-- Symbol cross reference -->
+<!-- Macros -->
+<!-- Protocols -->
+<!-- Transports -->
+<!-- Concept index -->
+<div style="break-before: page; page-break-before: always;"></div><style>
+.mdbook-alerts {
+  padding: 8px 16px;
+  margin-bottom: 16px;
+  border-left: 0.25em solid var(--mdbook-alerts-color);
+}
+
+.mdbook-alerts > *:first-child {
+  margin-top: 0;
+}
+
+.mdbook-alerts > *:last-child {
+  margin-bottom: 0;
+}
+
+.mdbook-alerts-title {
+  display: flex;
+  font-weight: 600;
+  align-items: center;
+  line-height: 1;
+  color: var(--mdbook-alerts-color);
+  text-transform: capitalize;
+}
+
+.mdbook-alerts-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.2em;
+  background-color: currentColor;
+  -webkit-mask: no-repeat center / 100%;
+  mask: no-repeat center / 100%;
+  -webkit-mask-image: var(--mdbook-alerts-icon);
+  mask-image: var(--mdbook-alerts-icon);
+}
+
+.mdbook-alerts-note {
+  --mdbook-alerts-color: rgb(9, 105, 218);
+  /* https://icon-sets.iconify.design/material-symbols/info-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 17q.425 0 .713-.288T13 16v-4q0-.425-.288-.712T12 11q-.425 0-.712.288T11 12v4q0 .425.288.713T12 17m0-8q.425 0 .713-.288T13 8q0-.425-.288-.712T12 7q-.425 0-.712.288T11 8q0 .425.288.713T12 9m0 13q-2.075 0-3.9-.788t-3.175-2.137q-1.35-1.35-2.137-3.175T2 12q0-2.075.788-3.9t2.137-3.175q1.35-1.35 3.175-2.137T12 2q2.075 0 3.9.788t3.175 2.137q1.35 1.35 2.138 3.175T22 12q0 2.075-.788 3.9t-2.137 3.175q-1.35 1.35-3.175 2.138T12 22m0-2q3.35 0 5.675-2.325T20 12q0-3.35-2.325-5.675T12 4Q8.65 4 6.325 6.325T4 12q0 3.35 2.325 5.675T12 20m0-8"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-tip {
+  --mdbook-alerts-color: rgb(26, 127, 55);
+  /* https://icon-sets.iconify.design/material-symbols/lightbulb-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 22q-.825 0-1.412-.587T10 20h4q0 .825-.587 1.413T12 22m-3-3q-.425 0-.712-.288T8 18q0-.425.288-.712T9 17h6q.425 0 .713.288T16 18q0 .425-.288.713T15 19zm-.75-3q-1.725-1.025-2.738-2.75T4.5 9.5q0-3.125 2.188-5.312T12 2q3.125 0 5.313 2.188T19.5 9.5q0 2.025-1.012 3.75T15.75 16zm.6-2h6.3q1.125-.8 1.738-1.975T17.5 9.5q0-2.3-1.6-3.9T12 4Q9.7 4 8.1 5.6T6.5 9.5q0 1.35.613 2.525T8.85 14M12 14"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-important {
+  --mdbook-alerts-color: rgb(130, 80, 223);
+  /* https://icon-sets.iconify.design/material-symbols/chat-info-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 7q.425 0 .713-.288T13 6q0-.425-.288-.712T12 5q-.425 0-.712.288T11 6q0 .425.288.713T12 7m0 8q.425 0 .713-.288T13 14v-4q0-.425-.288-.712T12 9q-.425 0-.712.288T11 10v4q0 .425.288.713T12 15m-6 3l-2.3 2.3q-.475.475-1.088.213T2 19.575V4q0-.825.588-1.412T4 2h16q.825 0 1.413.588T22 4v12q0 .825-.587 1.413T20 18zm-.85-2H20V4H4v13.125zM4 16V4z"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-warning {
+  --mdbook-alerts-color: rgb(154, 103, 0);
+  /* https://icon-sets.iconify.design/material-symbols/warning-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M2.725 21q-.275 0-.5-.137t-.35-.363q-.125-.225-.137-.488t.137-.512l9.25-16q.15-.25.388-.375T12 3q.25 0 .488.125t.387.375l9.25 16q.15.25.138.513t-.138.487q-.125.225-.35.363t-.5.137zm1.725-2h15.1L12 6zM12 18q.425 0 .713-.288T13 17q0-.425-.288-.712T12 16q-.425 0-.712.288T11 17q0 .425.288.713T12 18m0-3q.425 0 .713-.288T13 14v-3q0-.425-.288-.712T12 10q-.425 0-.712.288T11 11v3q0 .425.288.713T12 15m0-2.5"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-caution {
+  --mdbook-alerts-color: rgb(207, 34, 46);
+  /* https://icon-sets.iconify.design/material-symbols/brightness-alert-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 17q.425 0 .713-.288T13 16q0-.425-.288-.712T12 15q-.425 0-.712.288T11 16q0 .425.288.713T12 17m0-4q.425 0 .713-.288T13 12V8q0-.425-.288-.712T12 7q-.425 0-.712.288T11 8v4q0 .425.288.713T12 13m-3.35 7H6q-.825 0-1.412-.587T4 18v-2.65L2.075 13.4q-.275-.3-.425-.662T1.5 12q0-.375.15-.737t.425-.663L4 8.65V6q0-.825.588-1.412T6 4h2.65l1.95-1.925q.3-.275.663-.425T12 1.5q.375 0 .738.15t.662.425L15.35 4H18q.825 0 1.413.588T20 6v2.65l1.925 1.95q.275.3.425.663t.15.737q0 .375-.15.738t-.425.662L20 15.35V18q0 .825-.587 1.413T18 20h-2.65l-1.95 1.925q-.3.275-.662.425T12 22.5q-.375 0-.737-.15t-.663-.425zm.85-2l2.5 2.5l2.5-2.5H18v-3.5l2.5-2.5L18 9.5V6h-3.5L12 3.5L9.5 6H6v3.5L3.5 12L6 14.5V18zm2.5-6"%2F%3E%3C%2Fsvg%3E');
+}
+
+</style>
 <h1 id="messages"><a class="header" href="#messages">Messages</a></h1>
 <p>Messages <a name="a001"></a> in Scalability Protocols are the fundamental unit of
 transmission and reception, as these protocols are fundamentally message-oriented.</p>
@@ -875,6 +1019,161 @@ either directly by the application, or when the message was received by the prot
             // handle error
         }
     }
+</code></pre>
+<!-- Symbol cross reference -->
+<!-- Macros -->
+<!-- Protocols -->
+<!-- Transports -->
+<!-- Concept index -->
+<div style="break-before: page; page-break-before: always;"></div><style>
+.mdbook-alerts {
+  padding: 8px 16px;
+  margin-bottom: 16px;
+  border-left: 0.25em solid var(--mdbook-alerts-color);
+}
+
+.mdbook-alerts > *:first-child {
+  margin-top: 0;
+}
+
+.mdbook-alerts > *:last-child {
+  margin-bottom: 0;
+}
+
+.mdbook-alerts-title {
+  display: flex;
+  font-weight: 600;
+  align-items: center;
+  line-height: 1;
+  color: var(--mdbook-alerts-color);
+  text-transform: capitalize;
+}
+
+.mdbook-alerts-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.2em;
+  background-color: currentColor;
+  -webkit-mask: no-repeat center / 100%;
+  mask: no-repeat center / 100%;
+  -webkit-mask-image: var(--mdbook-alerts-icon);
+  mask-image: var(--mdbook-alerts-icon);
+}
+
+.mdbook-alerts-note {
+  --mdbook-alerts-color: rgb(9, 105, 218);
+  /* https://icon-sets.iconify.design/material-symbols/info-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 17q.425 0 .713-.288T13 16v-4q0-.425-.288-.712T12 11q-.425 0-.712.288T11 12v4q0 .425.288.713T12 17m0-8q.425 0 .713-.288T13 8q0-.425-.288-.712T12 7q-.425 0-.712.288T11 8q0 .425.288.713T12 9m0 13q-2.075 0-3.9-.788t-3.175-2.137q-1.35-1.35-2.137-3.175T2 12q0-2.075.788-3.9t2.137-3.175q1.35-1.35 3.175-2.137T12 2q2.075 0 3.9.788t3.175 2.137q1.35 1.35 2.138 3.175T22 12q0 2.075-.788 3.9t-2.137 3.175q-1.35 1.35-3.175 2.138T12 22m0-2q3.35 0 5.675-2.325T20 12q0-3.35-2.325-5.675T12 4Q8.65 4 6.325 6.325T4 12q0 3.35 2.325 5.675T12 20m0-8"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-tip {
+  --mdbook-alerts-color: rgb(26, 127, 55);
+  /* https://icon-sets.iconify.design/material-symbols/lightbulb-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 22q-.825 0-1.412-.587T10 20h4q0 .825-.587 1.413T12 22m-3-3q-.425 0-.712-.288T8 18q0-.425.288-.712T9 17h6q.425 0 .713.288T16 18q0 .425-.288.713T15 19zm-.75-3q-1.725-1.025-2.738-2.75T4.5 9.5q0-3.125 2.188-5.312T12 2q3.125 0 5.313 2.188T19.5 9.5q0 2.025-1.012 3.75T15.75 16zm.6-2h6.3q1.125-.8 1.738-1.975T17.5 9.5q0-2.3-1.6-3.9T12 4Q9.7 4 8.1 5.6T6.5 9.5q0 1.35.613 2.525T8.85 14M12 14"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-important {
+  --mdbook-alerts-color: rgb(130, 80, 223);
+  /* https://icon-sets.iconify.design/material-symbols/chat-info-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 7q.425 0 .713-.288T13 6q0-.425-.288-.712T12 5q-.425 0-.712.288T11 6q0 .425.288.713T12 7m0 8q.425 0 .713-.288T13 14v-4q0-.425-.288-.712T12 9q-.425 0-.712.288T11 10v4q0 .425.288.713T12 15m-6 3l-2.3 2.3q-.475.475-1.088.213T2 19.575V4q0-.825.588-1.412T4 2h16q.825 0 1.413.588T22 4v12q0 .825-.587 1.413T20 18zm-.85-2H20V4H4v13.125zM4 16V4z"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-warning {
+  --mdbook-alerts-color: rgb(154, 103, 0);
+  /* https://icon-sets.iconify.design/material-symbols/warning-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M2.725 21q-.275 0-.5-.137t-.35-.363q-.125-.225-.137-.488t.137-.512l9.25-16q.15-.25.388-.375T12 3q.25 0 .488.125t.387.375l9.25 16q.15.25.138.513t-.138.487q-.125.225-.35.363t-.5.137zm1.725-2h15.1L12 6zM12 18q.425 0 .713-.288T13 17q0-.425-.288-.712T12 16q-.425 0-.712.288T11 17q0 .425.288.713T12 18m0-3q.425 0 .713-.288T13 14v-3q0-.425-.288-.712T12 10q-.425 0-.712.288T11 11v3q0 .425.288.713T12 15m0-2.5"%2F%3E%3C%2Fsvg%3E');
+}
+
+.mdbook-alerts-caution {
+  --mdbook-alerts-color: rgb(207, 34, 46);
+  /* https://icon-sets.iconify.design/material-symbols/brightness-alert-outline-rounded/ */
+  --mdbook-alerts-icon: url('data:image/svg+xml,%3Csvg xmlns="http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg" width="24" height="24" viewBox="0 0 24 24"%3E%3Cpath fill="currentColor" d="M12 17q.425 0 .713-.288T13 16q0-.425-.288-.712T12 15q-.425 0-.712.288T11 16q0 .425.288.713T12 17m0-4q.425 0 .713-.288T13 12V8q0-.425-.288-.712T12 7q-.425 0-.712.288T11 8v4q0 .425.288.713T12 13m-3.35 7H6q-.825 0-1.412-.587T4 18v-2.65L2.075 13.4q-.275-.3-.425-.662T1.5 12q0-.375.15-.737t.425-.663L4 8.65V6q0-.825.588-1.412T6 4h2.65l1.95-1.925q.3-.275.663-.425T12 1.5q.375 0 .738.15t.662.425L15.35 4H18q.825 0 1.413.588T20 6v2.65l1.925 1.95q.275.3.425.663t.15.737q0 .375-.15.738t-.425.662L20 15.35V18q0 .825-.587 1.413T18 20h-2.65l-1.95 1.925q-.3.275-.662.425T12 22.5q-.375 0-.737-.15t-.663-.425zm.85-2l2.5 2.5l2.5-2.5H18v-3.5l2.5-2.5L18 9.5V6h-3.5L12 3.5L9.5 6H6v3.5L3.5 12L6 14.5V18zm2.5-6"%2F%3E%3C%2Fsvg%3E');
+}
+
+</style>
+<h1 id="sockets"><a class="header" href="#sockets">Sockets</a></h1>
+<p>Sockets <a name="a001"></a> in Scalability Protocols provide the handle for communication
+between peers. Sockets also encapsulate protocol specific semantics, such as
+filtering subscriptions, or automatically retrying requests.</p>
+<h2 id="socket-structure"><a class="header" href="#socket-structure">Socket Structure</a></h2>
+<pre><code class="language-c">#define NNG_SOCKET_INITIALIZER // opaque value
+
+typedef struct nng_socket_s nng_socket;
+</code></pre>
+<p>The <a name="a002"></a><code>nng_socket</code> structure represents socket. This is a handle, and
+the members of it are opaque. However, unlike a pointer, it is usually
+passed by value.</p>
+<p>A socket may be initialized statically with the <code>NNG_SOCKET_INITIALIZER</code> macro,
+to ensure that it cannot be confused with a valid open socket.</p>
+<h2 id="socket-identity"><a class="header" href="#socket-identity">Socket Identity</a></h2>
+<pre><code class="language-c">int nng_socket_id(nng_socket s);
+int nng_socket_raw(nng_socket s, bool *raw);
+int nng_socket_proto_id(nng_socket s, uint16_t *proto);
+int nng_socket_peer_id(nng_socket s, uint16_t *proto);
+int nng_socket_proto_name(nng_socket s, const char **name);
+int nng_socket_peer_name(nng_socket s, const char **name);
+</code></pre>
+<p>These functions are used to provide fundamental information about the socket <em>s</em>.
+Most applications will not need to use these functions.</p>
+<p>The <a name="a003"></a><code>nng_socket_id</code> function returns the numeric id, which will be a non-negative
+value, associated with the socket. If the socket is uninitialized (has never been opened),
+then the return value may be <code>-1</code>.</p>
+<p>The <a name="a004"></a><code>nng_socket_proto_id</code> and <a name="a005"></a><code>nng_socket_peer_id</code> functions provide the 16-bit
+protocol identifier for the socket’s protocol, and of the protocol peers will use when
+communicating with the socket.</p>
+<p>The <a name="a006"></a><code>nng_socket_proto_name</code> and <a name="a007"></a><code>nng_socket_peer_name</code> functions provide the ASCII
+names of the socket’s protocol, and of the protocol peers of the socket use.
+The value stored in <em>name</em> is a fixed string located in program text, and must not be freed
+or altered. It is guaranteed to remain valid while this library is present.</p>
+<p>The <a name="a008"></a><code>nng_socket_raw</code> function determines whether the socket is in
+<a href="api//TODO.html">raw mode</a> or not, storing <code>true</code> in <em>raw</em> if it is, or <code>false</code> if it is not.</p>
+<h2 id="polling-socket-events"><a class="header" href="#polling-socket-events">Polling Socket Events</a></h2>
+<pre><code class="language-c">int nng_socket_get_recv_poll_fd(nng_socket s, int *fdp);
+int nng_socket_get_send_poll_fd(nng_socket s, int *fdp);
+</code></pre>
+<p>Sometimes it is necessary to integrate a socket into a <code>poll</code> or <code>select</code> driven
+<a name="a009"></a>event loop. (Or, on Linux, <code>epoll</code>, or on BSD derived systems like macOS <code>kqueue</code>).</p>
+<p>For these occasions, a suitable file descriptor for polling is provided
+by these two functions.</p>
+<p>The <a name="a010"></a><code>nng_socket_get_recv_poll_fd</code> function obtains a file descriptor
+that will poll as readable when a message is ready for receiving for the socket.</p>
+<p>The <a name="a011"></a><code>nng_socket_get_send_poll_fd</code> function obtains a file descriptor
+that will poll as readable when the socket can accept a message for sending.</p>
+<p>These file descriptors should only be polled for readability, and no
+other operation performed on them. The socket will read from, or write to,
+these file descriptors to provide a level-signaled behavior automatically.</p>
+<p>Additionally the socket will close these file descriptors when the socket itself is closed.</p>
+<p>These functions replace the <code>NNG_OPT_SENDFD</code> and <code>NNG_OPT_RECVFD</code> socket options that
+were available in previous versions of NNG.</p>
+<div class="mdbook-alerts mdbook-alerts-note">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  note
+</p>
+<p>These functions are not compatible with <a href="api//TODO.html">contexts</a>.</p>
+</div>
+<div class="mdbook-alerts mdbook-alerts-note">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  note
+</p>
+<p>The file descriptors supplied by these functions is not used for transporting message data.
+The only valid use of these file descriptors is for polling for the ability to send or receive
+messages on the socket.</p>
+</div>
+<div class="mdbook-alerts mdbook-alerts-tip">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  tip
+</p>
+<p>Using these functions will force the socket to perform extra system calls, and thus
+have a negative impact on performance and latency. It is preferable to use <a href="api//api/aio.html">asynchronous I/O</a>
+when possible.</p>
+</div>
+<h2 id="examples-1"><a class="header" href="#examples-1">Examples</a></h2>
+<h3 id="example-1-initializing-a-socket"><a class="header" href="#example-1-initializing-a-socket">Example 1: Initializing a Socket</a></h3>
+<pre><code class="language-c">nng_socket s = NNG_SOCKET_INITIALIZER;
 </code></pre>
 <!-- Symbol cross reference -->
 <!-- Macros -->
@@ -1231,45 +1530,78 @@ and <a href="https://datatracker.ietf.org/doc/html/rfc3986">RFC 3968</a>.</p>
 that are not part of the IETF standards.</p>
 <h2 id="url-structure"><a class="header" href="#url-structure">URL Structure</a></h2>
 <pre><code class="language-c">typedef struct nng_url {
-    char *u_rawurl;
-    char *u_scheme;
-    char *u_userinfo;
-    char *u_host;
-    char *u_hostname;
-    char *u_port;
-    char *u_path;
-    char *u_query;
-    char *u_fragment;
-    char *u_requri;
+    const char *u_scheme;
+    char       *u_userinfo;
+    char       *u_hostname;
+    uint16_t   u_port;
+    char       *u_path;
+    char       *u_query;
+    char       *u_fragment;
 } nng_url;
+
+const char *nng_url_scheme(const nng_url *url);
+const char *nng_url_userinfo(const nng_url *url);
+const char *nng_url_hostname(const nng_url *url);
+uint16_t    nng_url_port(const nng_url *url);
+const char *nng_url_path(const nng_url *url);
+const char *nng_url_query(const nng_url *url);
+const char *nng_url_fragment(const nng_url *url):
 </code></pre>
 <h3 id="url-fields"><a class="header" href="#url-fields">URL Fields</a></h3>
-<p>Applications may access individual fields, but must not free or
-alter them, as the underlying memory is managed by the library.</p>
-<p>The fields of an <code>nng_url</code> object are as follows:</p>
-<ul>
-<li><code>u_rawurl</code>: The unparsed URL string. This will never be <code>NULL</code>.</li>
-<li><code>u_scheme</code>: The URL scheme, such as “http” or “inproc”. Always lower case. This will never be <code>NULL</code>.</li>
-<li><code>u_userinfo</code>: This username and password if supplied in the URL string. Will be <code>NULL</code> when not present.</li>
-<li><code>u_host</code>: The full host part of the URL, including the port if present (separated by a colon.)</li>
-<li><code>u_hostname</code>: The name of the host, and may be the empty string in some cases.</li>
-<li><code>u_port</code>: The port. May be empty if irrelevant or not specified.</li>
-<li><code>u_path</code>: The path, typically used with HTTP or WebSockets. Will be empty string if not specified.</li>
-<li><code>u_query</code>: The query info (typically following <code>?</code> in the URL.) Will be <code>NULL</code> if not present.</li>
-<li><code>u_fragment</code>: This is used for specifying an anchor, the part after <code>#</code> in a URL. Will be <code>NULL</code> if not present.</li>
-<li><code>u_requri</code>: The full Request-URI. Will be the empty string if not specified.</li>
-</ul>
-<div class="mdbook-alerts mdbook-alerts-note">
+<p>The <a name="a003"></a><code>nng_url_scheme</code> function returns the scheme,
+without any colons or slashes. Values are lower case
+strings, like “http” or “inproc” or “tls+tcp4”.</p>
+<p>The <a name="a004"></a><code>nng_url_userinfo</code> function returns a string corresponding
+to the user component of a URL (the part before any <code>@</code> sign) if such
+a component is present, otherwise it returns <code>NULL</code>.</p>
+<p>The <a name="a005"></a><code>nng_url_hostname</code> function returns a hostname (which might
+actually be an IP address) from the URL, if the URL corresponds to a scheme
+that uses hostnames (like “http” or “tcp”). If the URL does not (for example
+“inproc” or “ipc” URLs) then it returns <code>NULL</code>.</p>
+<p>The <a name="a006"></a><code>nng_url_port</code> function returns the TCP or UDP port number if the URL
+corresponds to a protocol based on TCP or UDP. It returns zero otherwise.
+Note that the port number might not have been explicitly specified in the URL.
+For example, the port number associated with “http://www.example.com” is 80,
+which is the standard port number for HTTP.</p>
+<div class="mdbook-alerts mdbook-alerts-tip">
 <p class="mdbook-alerts-title">
   <span class="mdbook-alerts-icon"></span>
-  note
+  tip
 </p>
-<p>Other fields may also be present, but only those documented here are safe for application use.</p>
+<p>The port number returned by this is in the native machine byte order.
+Be careful when using this with other network-oriented APIs.</p>
+</div>
+<p>The <a name="a007"></a><code>nng_url_path</code> function returns the path component of the URL.
+This will always be non-<code>NULL</code>, but it may be empty.</p>
+<p>The <a name="a008"></a><code>nng_url_query</code> and <a name="a009"></a><code>nng_url_fragment</code> functions return
+the query-information (the part following a ‘?’) and fragment
+(the part following a ‘#’) if those components are present, or <code>NULL</code>
+if they are not. The returned string will not include the leading ‘?’ or ‘#’
+characters.</p>
+<p>Note that any strings returned by these functions are only valid until
+<em>url</em> is freed with <a href="api//api/url.html#destroy-a-url"><code>nng_url_free</code></a>.</p>
+<h2 id="format-a-url"><a class="header" href="#format-a-url">Format a URL</a></h2>
+<pre><code class="language-c">int nng_url_sprintf(char *buf, size_t bufsz, const nng_url *url);
+</code></pre>
+<p>The <a name="a010"></a><code>nng_url_sprintf</code> function formats the <em>url</em> to the <em>buf</em>,
+which must have <code>bufsz</code> bytes of free space associated with it.</p>
+<p>This function returns the number of bytes formatted to <em>buf</em>, excludng
+the terminating zero byte, or if <em>bufsz</em> is too small, then it returns
+the number of bytes that would have been formatted if there was sufficient
+space. The semantics are similar to the <code>snprintf</code> function from C99.</p>
+<div class="mdbook-alerts mdbook-alerts-tip">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  tip
+</p>
+<p>If <em>bufsz</em> is 0, then <em>buf</em> can be <code>NULL</code>, and the return value
+can be used to determine the amount of space to allocate for a dynamically
+sized buffer.</p>
 </div>
 <h2 id="parse-a-url"><a class="header" href="#parse-a-url">Parse a URL</a></h2>
 <pre><code class="language-c">int nng_url_parse(nng_url **urlp, const char *str);
 </code></pre>
-<p>The <a name="a003"></a><code>nng_url_parse</code> function parses a URL string (in <em>str</em>),
+<p>The <a name="a011"></a><code>nng_url_parse</code> function parses a URL string (in <em>str</em>),
 and creates a dynamically allocated <code>nng_url</code>, returning it in <em>urlp</em>.</p>
 <div class="mdbook-alerts mdbook-alerts-important">
 <p class="mdbook-alerts-title">
@@ -1281,11 +1613,11 @@ and creates a dynamically allocated <code>nng_url</code>, returning it in <em>ur
 <h2 id="clone-a-url"><a class="header" href="#clone-a-url">Clone a URL</a></h2>
 <pre><code class="language-c">int nng_url_clone(nng_url **dup, nng_url *url);
 </code></pre>
-<p>The <a name="a004"></a><code>nng_url_clone</code> function creates a copy of <em>url</em>, and returns it in <em>dup</em>.</p>
+<p>The <a name="a012"></a><code>nng_url_clone</code> function creates a copy of <em>url</em>, and returns it in <em>dup</em>.</p>
 <h2 id="destroy-a-url"><a class="header" href="#destroy-a-url">Destroy a URL</a></h2>
 <pre><code class="language-c">void nng_url_free(nng_url *url);
 </code></pre>
-<p>The <a name="a005"></a><code>nng_url_free</code> function destroy an <code>nng_url</code> object created with
+<p>The <a name="a013"></a><code>nng_url_free</code> function destroy an <code>nng_url</code> object created with
 either <a href="api//api/url.html#parse-a-url"><code>nng_url_parse</code></a> or <a href="api//api/url.html#destroy-a-url"><code>nng_url_free</code></a>.</p>
 <p>This is the only correct way to destroy an <a href="api//api/url.html#url-structure"><code>nng_url</code></a> object.</p>
 <h2 id="see-also-1"><a class="header" href="#see-also-1">See Also</a></h2>
@@ -1800,30 +2132,30 @@ one thread (which may be chosen randomly).</p>
 all threads concurrently, but should only be used in circumstances where the application
 does not depend on <em>which</em> thread will be woken. When in doubt, <code>nng_cv_wake</code> is safer.</p>
 </div>
-<h2 id="examples-1"><a class="header" href="#examples-1">Examples</a></h2>
+<h2 id="examples-2"><a class="header" href="#examples-2">Examples</a></h2>
 <h3 id="example-1-allocating-the-condition-variable"><a class="header" href="#example-1-allocating-the-condition-variable">Example 1: Allocating the condition variable</a></h3>
-<pre><code class="language-c">	nng_mtx *m;
-	nng_cv *cv;
-	nng_mtx_alloc(&amp;m); // error checks elided
-	nng_cv_alloc(&amp;cv, m);
+<pre><code class="language-c">nng_mtx *m;
+nng_cv *cv;
+nng_mtx_alloc(&amp;m); // error checks elided
+nng_cv_alloc(&amp;cv, m);
 </code></pre>
 <h3 id="example-2-waiting-for-the-condition"><a class="header" href="#example-2-waiting-for-the-condition">Example 2: Waiting for the condition</a></h3>
-<pre><code class="language-c">    expire = nng_clock() + 1000; // 1 second in the future
-    nng_mtx_lock(m);  // assume cv was allocated using m
-    while (!condition_true) {
-        if (nng_cv_until(cv, expire) == NNG_ETIMEDOUT) {
-            printf("Time out reached!\n");
-            break;
-        }
-    }
-    // condition_true is true
-    nng_mtx_unlock(m);
+<pre><code class="language-c">expire = nng_clock() + 1000; // 1 second in the future
+nng_mtx_lock(m);  // assume cv was allocated using m
+while (!condition_true) {
+  if (nng_cv_until(cv, expire) == NNG_ETIMEDOUT) {
+    printf("Time out reached!\n");
+    break;
+  }
+}
+// condition_true is true
+nng_mtx_unlock(m);
 </code></pre>
 <h3 id="example-3-signaling-the-condition"><a class="header" href="#example-3-signaling-the-condition">Example 3: Signaling the condition</a></h3>
-<pre><code class="language-c">    nng_mtx_lock(m);
-    condition_true = true;
-    nng_cv_wake(cv);
-    nng_mtx_unlock(m);
+<pre><code class="language-c">nng_mtx_lock(m);
+condition_true = true;
+nng_cv_wake(cv);
+nng_mtx_unlock(m);
 </code></pre>
 <!-- Symbol cross reference -->
 <!-- Macros -->
@@ -2113,12 +2445,12 @@ set by <code>nng_log_set_level</code> or the default
 if that function has not been called.</p>
 <p>The log levels are defined as follows:</p>
 <pre><code class="language-c">typedef enum nng_log_level {
-	NNG_LOG_NONE   = 0, // used for filters only, NNG suppresses these
-	NNG_LOG_ERR    = 3,
-	NNG_LOG_WARN   = 4,
-	NNG_LOG_NOTICE = 5,
-	NNG_LOG_INFO   = 6,
-	NNG_LOG_DEBUG  = 7
+    NNG_LOG_NONE   = 0, // used for filters only, NNG suppresses these
+    NNG_LOG_ERR    = 3,
+    NNG_LOG_WARN   = 4,
+    NNG_LOG_NOTICE = 5,
+    NNG_LOG_INFO   = 6,
+    NNG_LOG_DEBUG  = 7
 } nng_log_level;
 </code></pre>
 <p>The value <code>NNG_LOG_NONE</code> may be useful to suppress message logs altogether.</p>
@@ -2135,17 +2467,17 @@ Traditionally these are used with the UNIX <code>syslog</code> system, and
 the values here represent some (but not all) of the values found there.</p>
 <p>The following values are defined:</p>
 <pre><code class="language-c">typedef enum nng_log_facility {
-	NNG_LOG_USER   = 1,
-	NNG_LOG_DAEMON = 3,
-	NNG_LOG_AUTH   = 10,
-	NNG_LOG_LOCAL0 = 16,
-	NNG_LOG_LOCAL1 = 17,
-	NNG_LOG_LOCAL2 = 18,
-	NNG_LOG_LOCAL3 = 19,
-	NNG_LOG_LOCAL4 = 20,
-	NNG_LOG_LOCAL5 = 21,
-	NNG_LOG_LOCAL6 = 22,
-	NNG_LOG_LOCAL7 = 23,
+    NNG_LOG_USER   = 1,
+    NNG_LOG_DAEMON = 3,
+    NNG_LOG_AUTH   = 10,
+    NNG_LOG_LOCAL0 = 16,
+    NNG_LOG_LOCAL1 = 17,
+    NNG_LOG_LOCAL2 = 18,
+    NNG_LOG_LOCAL3 = 19,
+    NNG_LOG_LOCAL4 = 20,
+    NNG_LOG_LOCAL5 = 21,
+    NNG_LOG_LOCAL6 = 22,
+    NNG_LOG_LOCAL7 = 23,
 } nng_log_facility;
 </code></pre>
 <p>The <a name="a006"></a><code>nng_log_set_facility</code> function can be used to
@@ -4309,42 +4641,14 @@ Attempts to send messages will result in <code>NNG_ENOTSUP</code>.</p>
 <p>Only version 0 of this protocol is supported.
 (At the time of writing, no other versions of this protocol have been defined.)</p>
 <h3 id="protocol-options-8"><a class="header" href="#protocol-options-8">Protocol Options</a></h3>
-<p>The following protocol-specific options are available.</p>
+<p>The following protocol-specific option is available.</p>
 <ul>
-<li>
-<p><a name="a004"></a><code>NNG_OPT_SUB_SUBSCRIBE</code><a name="a005"></a>: <br />
-<br />
-This option registers a topic that the subscriber is interested in.
-The option is write-only, and takes an array of bytes, of arbitrary size.
-Each incoming message is checked against the list of subscribed topics.
-If the body begins with the entire set of bytes in the topic, then the
-message is accepted. If no topic matches, then the message is
-discarded. <br />
-<br />
-This option is a byte array. Thus if you use
-<a href="proto/TODO.html"><code>nng_socket_set_string</code></a> the <code>NUL</code> terminator byte will
-be included in the topic.
-If that isn’t desired, consider using
-<a href="proto/TODO.html"><code>nng_socket_set</code></a> and using <code>strlen</code> of the topic
-as the topic size. <br />
-<br />
-To receive all messages, an empty topic (zero length) can be used.</p>
-</li>
-<li>
-<p><a name="a006"></a><code>NNG_OPT_SUB_UNSUBSCRIBE</code>: <br />
-<br />
-This option, also read-only, removes a topic from the subscription list.
-Note that if the topic was not previously subscribed to with
-<code>NNG_OPT_SUB_SUBSCRIBE</code> then an <code>NNG_ENOENT</code> error will result.</p>
-</li>
-<li>
-<p><a name="a007"></a><code>NNG_OPT_SUB_PREFNEW</code>: <br />
+<li><a name="a004"></a><code>NNG_OPT_SUB_PREFNEW</code>: <br />
 (<code>bool</code>) <br />
 <br />
 This read/write option specifies the behavior of the subscriber when the queue is full.
 When <code>true</code> (the default), the subscriber will make room in the queue by removing the oldest message.
-When <code>false</code>, the subscriber will reject messages if the message queue does not have room.</p>
-</li>
+When <code>false</code>, the subscriber will reject messages if the message queue does not have room.</li>
 </ul>
 <h3 id="protocol-headers-8"><a class="header" href="#protocol-headers-8">Protocol Headers</a></h3>
 <p>The <em>SUB</em> protocol has no protocol-specific headers.</p>
@@ -4794,7 +5098,7 @@ relative to the root directory.</p>
   note
 </p>
 <p>When using relative paths on POSIX systems, the address used and returned
-in properties like <code>NNG_OPT_LOCADDR</code> and <code>NNG_OPT_URL</code> will also be relative.
+in properties like <code>NNG_OPT_LOCADDR</code> will also be relative.
 Consequently, they will only be interpreted the same by processes that have
 the same working directory.
 To ensure maximum portability and safety, absolute paths are recommended
@@ -4826,32 +5130,39 @@ For example, the name <code>"a\0b"</code> would be represented as <code>abstract
 </p>
 <p>An empty name may be used with a listener to request “auto bind” be used to select a name.
 In this case the system will allocate a free name.
-The name assigned may be retrieved using <a href="tran/TODO.html"><a name="a009"></a><code>NNG_OPT_LOCADDR</code></a>.</p>
+The name assigned may be retrieved using [<a name="a009"></a><code>NNG_OPT_LOCADDR</code>][NNG_OPT_LOCADDR].</p>
 </div>
 <p>Abstract names do not include the leading <code>NUL</code> byte used in the low-level socket address.</p>
 <p>Abstract sockets do not have any representation in the file system, and are automatically freed by
 the system when no longer in use.</p>
 <p>Abstract sockets ignore socket permissions, but it is still possible to determine the credentials
-of the peer with <a href="tran/TODO.html"><a name="a010"></a><code>NNG_OPT_PEER_UID</code></a>, and similar options.
+of the peer with [<a name="a010"></a><code>NNG_OPT_PEER_UID</code>][NNG_OPT_PEER_UID], and similar options.
 <sup><a name="to-footnote-2"><a href="tran/ipc.html#footnote-2">2</a></a></sup></p>
 <h3 id="socket-address-1"><a class="header" href="#socket-address-1">Socket Address</a></h3>
-<p>When using an <a href="tran/TODO.html"><code>nng_sockaddr</code></a> structure,
-the actual structure is of type <a href="tran/TODO.html"><code>nng_sockaddr_ipc</code></a>,
-except for abstract sockets, which use <a href="tran/TODO.html"><code>nng_sockaddr_abstract</code></a>.</p>
+<p>When using an [<code>nng_sockaddr</code>] structure,
+the actual structure is of type [<code>nng_sockaddr_ipc</code>],
+except for abstract sockets, which use [<code>nng_sockaddr_abstract</code>].</p>
 <h3 id="transport-options-1"><a class="header" href="#transport-options-1">Transport Options</a></h3>
 <p>The following transport options are supported by this transport,
 where supported by the underlying platform.</p>
 <ul>
-<li><a href="tran/TODO.html"><code>NNG_OPT_IPC_PERMISSIONS</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_IPC_SECURITY_DESCRIPTOR</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_LOCADDR</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_REMADDR</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_PEER_GID</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_PEER_PID</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_PEER_UID</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_PEER_ZONEID</code></a></li>
-<li><a href="tran/TODO.html"><code>NNG_OPT_URL</code></a></li>
+<li>[<code>NNG_OPT_IPC_PERMISSIONS</code>][NNG_OPT_IPC_PERMISSIONS]</li>
+<li>[<code>NNG_OPT_LOCADDR</code>][NNG_OPT_LOCADDR]</li>
+<li>[<code>NNG_OPT_REMADDR</code>][NNG_OPT_REMADDR]</li>
+<li>[<code>NNG_OPT_PEER_GID</code>][NNG_OPT_PEER_GID]</li>
+<li>[<code>NNG_OPT_PEER_PID</code>][NNG_OPT_PEER_PID]</li>
+<li>[<code>NNG_OPT_PEER_UID</code>][NNG_OPT_PEER_UID]</li>
+<li>[<code>NNG_OPT_PEER_ZONEID</code>][NNG_OPT_PEER_ZONEID]</li>
 </ul>
+<h3 id="other-configuration-parameters"><a class="header" href="#other-configuration-parameters">Other Configuration Parameters</a></h3>
+<p>On Windows systems, the security descriptor for the listener,
+which can be used to control access, can be set using the function
+<a href="tran//TODO.html"><code>nng_listener_set_security_descriptor</code></a>.</p>
+<!-- Symbol cross reference -->
+<!-- Macros -->
+<!-- Protocols -->
+<!-- Transports -->
+<!-- Concept index -->
 <p><hr/>
 <p><a name="footnote-1"><a href="tran/ipc.html#to-footnote-1">1</a></a>: The purpose of this scheme is to support a future transport making use of <code>AF_UNIX</code>
 on Windows systems, at which time it will be necessary to discriminate between the Named Pipes and the <code>AF_UNIX</code> based transports.</p>
@@ -5117,7 +5428,6 @@ where supported by the underlying platform.</p>
 <ul>
 <li><a href="tran/%5BTODO.html"><code>NNG_OPT_LOCADDR</code></a></li>
 <li><a href="tran/%5BTODO.html"><code>NNG_OPT_REMADDR</code></a></li>
-<li><a href="tran/%5BTODO.html"><code>NNG_OPT_URL</code></a></li>
 </ul>
 <p>TODO: Document other options.</p>
 <h2 id="maximum-message-size"><a class="header" href="#maximum-message-size">Maximum Message Size</a></h2>
@@ -5288,6 +5598,9 @@ This guide should help in migrating applications to use NNG 2.0.</p>
 <h2 id="nanomsg-compatibility"><a class="header" href="#nanomsg-compatibility">Nanomsg Compatibility</a></h2>
 <p>Applications using the legacy <code>libnanomsg</code> API will have to be updated to native <em>NNG</em> interfaces.
 See the <a href="migrate/nanomsg.html">Migrating From libnanomsg</a> chapter for details.</p>
+<h2 id="library-initialization"><a class="header" href="#library-initialization">Library Initialization</a></h2>
+<p>It is now required for applications to initialize the library explicitly before using it.
+This is done using the <a href="migrate//api/init.html#initialization"><code>nng_init</code></a> function.</p>
 <h2 id="transport-specific-functions"><a class="header" href="#transport-specific-functions">Transport Specific Functions</a></h2>
 <p>Transports have not needed to be registered for a long time now,
 and the functions for doing so have been removed. These functions
@@ -5309,12 +5622,32 @@ can be simply removed from your application:</p>
 <code>NNG_OPT_WS_OPT_WS_REQUEST_HEADERS</code> and <code>NNG_OPT_WS_RESPONSE_HEADERS</code> have been removed.
 Just convert any use of them to <code>NNG_OPT_WS_REQUEST_HEADERS</code> or
 <code>NNG_OPT_WS_RESPONSE_HEADERS</code> as appropriate.</p>
-<h2 id="tls-options"><a class="header" href="#tls-options">TLS Options</a></h2>
-<p>The support for configuring TLS via <code>NNG_TLS_AUTH_MODE</code>, <code>NNG_OPT_TLS_CA_FILE</code>, <code>NNG_OPT_TLS_SERVER_NAME</code>,
-and similar has been removed. Instead configuration must be performed by allocating
+<h2 id="tls-configuration"><a class="header" href="#tls-configuration">TLS Configuration</a></h2>
+<p>The support for configuring TLS via <code>NNG_OPT_TLS_CONFIG</code>, <code>NNG_TLS_AUTH_MODE</code>, <code>NNG_OPT_TLS_CA_FILE</code>,
+<code>NNG_OPT_TLS_SERVER_NAME</code>, and similar has been removed.</p>
+<p>Instead configuration must be performed by allocating
 a <code>nng_tls_config</code> object, and then setting fields on it using the appropriate functions,
-after which it may be configured on a listener or dialer using the <code>NNG_OPT_TLS_CONFIG</code> option.</p>
-<p>Note that TLS configuration is now available in <code>&lt;nng/nng.h&gt;</code>, rather than the supplemental header.</p>
+after which it may be configured on a listener or dialer using the <a href="migrate//TODO.html"><code>nng_listener_set_tls</code></a>
+or <a href="migrate//TODO.html"><code>nng_dialer_set_tls</code></a> functions.</p>
+<p>Likewise, when using the streams API, use the <a href="migrate//TODO.html"><code>nng_stream_listener_set_tls</code></a> or
+<a href="migrate//TODO.html"><code>nng_stream_dialer_set_tls</code></a> functions.</p>
+<p>Note that the declarations needed for TLS configuration are now available in <code>&lt;nng/nng.h&gt;</code>,
+rather than the supplemental header.</p>
+<h2 id="old-tls-versions-removed"><a class="header" href="#old-tls-versions-removed">Old TLS Versions Removed</a></h2>
+<p>Support for very old TLS versions 1.0 and 1.1 is removed.
+Further, the <code>NNG_TLS_1_0</code> and <code>NNG_TLS_1_1</code> constants are also removed.
+Applications should use <code>NNG_TLS_1_2</code> or even <code>NNG_TLS_1_3</code> instead.</p>
+<h2 id="only-one-tls-keycert-per-configuration"><a class="header" href="#only-one-tls-keycert-per-configuration">Only One TLS Key/Cert Per Configuration</a></h2>
+<p>The ability to configure multiple keys and certificates for a given TLS configuration object is removed.
+(The <a href="migrate//TODO.html"><code>nng_tls_config_own_cert</code></a> will return <a href="migrate//api/errors.html#NNG_EBUSY"><code>NNG_EBUSY</code></a> if it has already been called for the configuration.)
+The intended purpose was to support alternative cryptographic algorithms, but this is not necessary, was never
+used, and was error prone.</p>
+<h2 id="support-for-local-addresses-in-dial-urls-removed"><a class="header" href="#support-for-local-addresses-in-dial-urls-removed">Support for Local Addresses in Dial URLs Removed</a></h2>
+<p>NNG 1.x had an undocumented ability to specify the local address to bind
+to when dialing, by using the local address in front of the destination
+address separated by a semicolon. This was provided for legacy libnanomsg
+compatilibility, and is no longer offered. The correct way to specify a
+local address is by setting <code>NNG_OPT_LOCADDR</code> on the dialer.</p>
 <h2 id="option-functions"><a class="header" href="#option-functions">Option Functions</a></h2>
 <p>The previously deprecated <code>nng_pipe_getopt_xxx</code> family of functions is removed.
 Applications should use <code>nng_pipe_get</code> and related functions instead.</p>
@@ -5323,6 +5656,28 @@ In this case, use the <code>nng_socket_get</code> and <code>nng_socket_set</code
 <p>The <code>_getopt</code> and <code>_setopt</code> functions for contexts, listeners, and dialers are no longer
 present. Simply changing <code>_getopt</code> to <code>_get</code> or <code>_setopt</code> to <code>_set</code> in the function name
 should be sufficient in most cases.</p>
+<p>The following functions served no useful purpose (after other changes described in this document),
+and are thus removed:</p>
+<ul>
+<li><code>nng_ctx_get_string</code></li>
+<li><code>nng_ctx_set_string</code></li>
+<li><code>nng_dialer_get_ptr</code></li>
+<li><code>nng_dialer_set_ptr</code></li>
+<li><code>nng_listener_get_ptr</code></li>
+<li><code>nng_listener_set_ptr</code></li>
+<li><code>nng_socket_get_ptr</code></li>
+<li><code>nng_socket_set_ptr</code></li>
+<li><code>nng_socket_get_string</code></li>
+<li><code>nng_socket_set_string</code></li>
+<li><code>nng_stream_get_ptr</code></li>
+<li><code>nng_stream_set_ptr</code></li>
+<li><code>nng_stream_dialer_get_ptr</code></li>
+<li><code>nng_stream_dialer_set_ptr</code></li>
+<li><code>nng_stream_listener_get_ptr</code></li>
+<li><code>nng_stream_listener_set_ptr</code></li>
+<li><code>nng_ctx_get_ptr</code> (not documented)</li>
+<li><code>nng_ctx_set_ptr</code> (not documented)</li>
+</ul>
 <h2 id="untyped-option-functions-removed"><a class="header" href="#untyped-option-functions-removed">Untyped Option Functions Removed</a></h2>
 <p>The following functions are removed. To access options, use a proper typed access function,
 such as one ending in a suffix like <code>_bool</code> (to access a <code>bool</code> typed option).</p>
@@ -5370,20 +5725,86 @@ before bringing them into the socket itself.</p>
 <h2 id="socket-options"><a class="header" href="#socket-options">Socket Options</a></h2>
 <p>The <code>NNG_OPT_PROTO</code>, <code>NNG_OPT_PROTONAME</code>, <code>NNG_OPT_PEER</code>, and <code>NNG_OPT_PEERNAME</code> options
 have been replaced by functions instead of options.
-Use <code>nng_socket_proto_id</code>, <code>nng_socket_peer_id</code>, <code>nng_socket_proto_name</code>, and <code>nng_socket_peer_name</code> instead.
+Use <a href="migrate//api/sock.html#socket-identity"><code>nng_socket_proto_id</code></a>, <a href="migrate//api/sock.html#socket-identity"><code>nng_socket_peer_id</code></a>, <a href="migrate//api/sock.html#socket-identity"><code>nng_socket_proto_name</code></a>, and <a href="migrate//api/sock.html#socket-identity"><code>nng_socket_peer_name</code></a> instead.
 Note that the new functions provide a reference to a static string, and thus do not require
 allocation, and the returned strings should not be freed. Also the IDs are provided as <code>uint16_t</code>,
 matching the actual wire protocol values, instead of <code>int</code>.</p>
-<p>The <code>NNG_OPT_RAW</code> option has aso been replaced by a function, <code>nng_socket_raw</code>.</p>
+<p>The <code>NNG_OPT_RAW</code> option has aso been replaced by a function, <a href="migrate//api/sock.html#socket-identity"><code>nng_socket_raw</code></a>.</p>
+<p>The <code>NNG_OPT_SENDFD</code> and <code>NNG_OPT_RECVFD</code> options have been replaced by
+<a href="migrate//api/sock.html#polling-socket-events"><code>nng_socket_get_send_poll_fd</code></a> and <a href="migrate//api/sock.html#polling-socket-events"><code>nng_socket_get_recv_poll_fd</code></a> respectively.</p>
+<p>The <code>NNG_OPT_SOCKNAME</code> function is removed. This was provided for application use, and never used internally by NNG.
+Applications should keep track of this information separately.</p>
 <h2 id="subscriptions"><a class="header" href="#subscriptions">Subscriptions</a></h2>
 <p>The <code>NNG_OPT_SUB_SUBSCRIBE</code> and <code>NNG_OPT_SUB_UNSUBCRIBE</code> options have been replaced by
-the following functions: <code>nng_sub0_socket_subscribe</code>, <code>nng_sub0_socket_unsubscribe</code>,
-<code>nng_sub0_ctx_subscribe</code> and <code>nng_sub0_ctx_unsubscribe</code>. These functions, like the options
+the following functions: <a href="migrate//TODO.html"><code>nng_sub0_socket_subscribe</code></a>, <a href="migrate//TODO.html"><code>nng_sub0_socket_unsubscribe</code></a>,
+<a href="migrate//TODO.html"><code>nng_sub0_ctx_subscribe</code></a> and <a href="migrate//TODO.html"><code>nng_sub0_ctx_unsubscribe</code></a>. These functions, like the options
 they replace, are only applicable to SUB sockets.</p>
 <h2 id="statistics-use-constified-pointers"><a class="header" href="#statistics-use-constified-pointers">Statistics Use Constified Pointers</a></h2>
-<p>A number of the statistics functions take, or return, <code>const nng_stat *</code> instead
+<p>A number of the <a href="migrate//api/stats.html">statistics</a> functions take, or return, <code>const nng_stat *</code> instead
 of plain <code>nng_stat *</code>. The ABI has not changed, but it may be necessary to declare
 certain methods variables <code>const</code> to avoid warnings about misuse of <code>const</code>.</p>
+<h2 id="wildcards-not-valid-in-urls"><a class="header" href="#wildcards-not-valid-in-urls">Wildcards Not Valid in URLs</a></h2>
+<p>The use of <code>*</code> to act as a wild card meaning all local interface addresses
+is removed. The empty string already performs this function, and unlike
+<code>*</code> is RFC compliant.</p>
+<h2 id="url-option-removed"><a class="header" href="#url-option-removed">URL Option Removed</a></h2>
+<p>The <code>NNG_OPT_URL</code> option has been removed.
+It is replaced by the type safe <a href="migrate//TODO.html"><code>nng_dialer_get_url</code></a> and
+<a href="migrate//TODO.html"><code>nng_listener_get_url</code></a> functions, which return an <a href="migrate//api/url.html#url-structure"><code>nng_url</code></a>
+structure instead of a string.</p>
+<h2 id="url-structure-changes"><a class="header" href="#url-structure-changes">URL Structure Changes</a></h2>
+<p>The details of <a href="migrate//api/url.html#url-structure"><code>nng_url</code></a> have changed significantly, and direct
+access of the structure is no longer permitted. Intead new
+accessors functions are provided:</p>
+<ul>
+<li><code>u_scheme</code> is replaced by [<code>nng_url_scheme</code>].</li>
+<li><code>u_port</code> is replaced by [<code>nng_url_port</code>], but this returns a <code>uint16_t</code>.</li>
+<li><code>u_hostname</code> is replaced by [<code>nng_url_hostname</code>].</li>
+<li><code>u_path</code> is replaced by [<code>nng_url_path</code>].</li>
+<li><code>u_query</code> is replaced by [<code>nng_url_query</code>].</li>
+<li><code>u_fragment</code> is replaced by [<code>nng_url_fragment</code>].</li>
+<li><code>u_userinfo</code> is replaced by [<code>nng_url_userinfo</code>].</li>
+<li><code>u_requri</code> is removed - it can be easily formulated from the other fields.</li>
+<li><code>u_host</code> is removed - use [<code>nng_url_hostname</code>] and [<code>nng_url_port</code>] to construct if needed</li>
+<li><code>u_rawurl</code> is removed - a “cooked” URL can be obtained from the new <a href="migrate//api/url.html#format-a-url"><code>nng_url_sprintf</code></a> function.</li>
+</ul>
+<h2 id="http-api"><a class="header" href="#http-api">HTTP API</a></h2>
+<p>A few limits on string lengths of certain values are now applied, which allows us to preallocate values
+and eliminate certain unreasonable error paths. If values longer than these are supplied in certain APIs
+they may be silently truncated to the limit:</p>
+<ul>
+<li>Hostnames are limited per RFC 1035 to 253 characters (not including terminating “.” or zero byte.)</li>
+<li>HTTP Method names are limited to 32 bytes (the longest IANA registered method is currently 18 bytes, used for WebDAV.)</li>
+<li>The fixed part of URI pathnames used with HTTP handlers is limited to 1024 bytes. (Longer URIs may be accepted
+by using [<code>nng_http_handler_set_tree</code>] and matching a parent of the directory component.)</li>
+</ul>
+<p>The following API calls have changed so that they are <code>void</code> returns, and cannot fail.
+They may silently truncate data.</p>
+<ul>
+<li>[<code>nng_http_req_set_method</code>]</li>
+<li>[<code>nng_http_res_set_status</code>]</li>
+<li>[<code>nng_http_handler_collect_body</code>]</li>
+<li>[<code>nng_http_handler_set_data</code>]</li>
+<li>[<code>nng_http_handler_set_host</code>]</li>
+<li>[<code>nng_http_handler_set_method</code>]</li>
+<li>[<code>nng_http_handler_set_tree</code>]</li>
+<li>[<code>nng_http_handler_set_tree_exclusive</code>]</li>
+</ul>
+<p>The HTTP handler objects may not be modified once in use. Previously this would fail with <code>NNG_EBUSY</code>.
+These checks are removed now, but debug builds will assert if an application tries to do so.</p>
+<h2 id="security-descriptors-windows-only"><a class="header" href="#security-descriptors-windows-only">Security Descriptors (Windows Only)</a></h2>
+<p>The <code>NNG_OPT_IPC_SECURITY_DESCRIPTOR</code> option is removed, and replaced
+with the functions [<code>nng_listener_get_security_descriptor</code>] and
+[<code>nng_stream_listener_get_security_descriptor</code>].</p>
+<p>Security descriptor support is only relevant to Windows,
+and is presently only supported for IPC when Named Pipes are used.
+Planned future changes to switch to UNIX domain sockets may eliminate
+support for security descriptors altogether in NNG.</p>
+<!-- Symbol cross reference -->
+<!-- Macros -->
+<!-- Protocols -->
+<!-- Transports -->
+<!-- Concept index -->
 <div style="break-before: page; page-break-before: always;"></div><style>
 .mdbook-alerts {
   padding: 8px 16px;
@@ -5461,6 +5882,9 @@ update it for this version of NNG.</p>
 <h2 id="link-libraries"><a class="header" href="#link-libraries">Link Libraries</a></h2>
 <p>Replace <code>-lnanomsg</code> with <code>-lnng</code>.
 It may be necessary to include additional system libraries, such as <code>-lpthread</code>, depending on your system.</p>
+<h2 id="initialization-1"><a class="header" href="#initialization-1">Initialization</a></h2>
+<p>It is necessary to explicitly initialize the library, using the <a href="migrate//api/init.html#initialization"><code>nng_init</code></a> function.
+This must be called before any other function.</p>
 <h2 id="types"><a class="header" href="#types">Types</a></h2>
 <p>Sockets, dialers, and listeners in <em>libnanomsg</em> are simple integers.
 In NNG, these are <code>struct</code> types.</p>
@@ -5470,16 +5894,16 @@ headers.</p>
 NNG approach to messages. Likewise there is no <code>struct nn_cmsghdr</code> equivalent.</p>
 <h2 id="api-conversions"><a class="header" href="#api-conversions">API Conversions</a></h2>
 <div class="table-wrapper"><table><thead><tr><th>Nanomsg API</th><th>NNG Equivalent</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>nn_strerror</code></td><td><code>nng_strerror</code></td><td></td></tr>
-<tr><td><code>nn_errno</code></td><td>No equivalent. Errors are redirectly rather than through <code>errno</code>.</td><td></td></tr>
-<tr><td><code>nn_socket</code></td><td>Use the appropriate protocol constructor, such as <code>nng_req0_open</code>.</td><td></td></tr>
+<tr><td><code>nn_strerror</code></td><td><a href="migrate//api/errors.html#human-readable-error-message"><code>nng_strerror</code></a></td><td></td></tr>
+<tr><td><code>nn_errno</code></td><td>None</td><td>Errors are returned directly rather than through <code>errno</code>.</td></tr>
+<tr><td><code>nn_socket</code></td><td>Various</td><td>Use the appropriate protocol constructor, such as <code>nng_req0_open</code>.</td></tr>
 <tr><td><code>nn_close</code></td><td><code>nng_close</code></td><td></td></tr>
 <tr><td><code>nn_bind</code></td><td><code>nng_listen</code>, <code>nng_listener_create</code></td><td>Allocating a listener with <code>nng_lister_create</code> and configuring it offers more capabilities.</td></tr>
 <tr><td><code>nn_connect</code></td><td><code>nng_dial</code>, <code>nng_dialer_create</code></td><td>Allocating a dialer with <code>nng_dialer_create</code> and configuring it offers more capabilities.</td></tr>
 <tr><td><code>nn_shutdown</code></td><td><code>nng_lister_close</code>, <code>nng_dialer_close</code></td><td></td></tr>
-<tr><td><code>nn_allocmsg</code></td><td><code>nng_msg_alloc</code></td><td>There are significant semantic differences.</td></tr>
-<tr><td><code>nn_freemsg</code></td><td><code>nng_msg_free</code></td><td></td></tr>
-<tr><td><code>nn_reallocmsg</code></td><td><code>nng_msg_realloc</code></td><td></td></tr>
+<tr><td><code>nn_allocmsg</code></td><td><a href="migrate//api/msg.html#create-a-message"><code>nng_msg_alloc</code></a></td><td>There are significant semantic differences.</td></tr>
+<tr><td><code>nn_freemsg</code></td><td><a href="migrate//api/msg.html#destroy-a-message"><code>nng_msg_free</code></a></td><td></td></tr>
+<tr><td><code>nn_reallocmsg</code></td><td><a href="migrate//api/msg.html#message-size-and-capacity"><code>nng_msg_realloc</code></a></td><td></td></tr>
 <tr><td><code>nn_send</code></td><td><code>nng_send</code></td><td></td></tr>
 <tr><td><code>nn_recv</code></td><td><code>nng_recv</code></td><td></td></tr>
 <tr><td><code>nn_sendmsg</code></td><td><code>nng_sendmsg</code></td><td></td></tr>
@@ -5499,8 +5923,8 @@ NNG approach to messages. Likewise there is no <code>struct nn_cmsghdr</code> eq
 <tr><td><code>NN_CMSG_LEN</code></td><td>None</td><td></td></tr>
 <tr><td><code>NN_CMSG_SPACE</code></td><td>None</td><td></td></tr>
 <tr><td><code>struct nn_iovec</code></td><td><code>nng_iov</code></td><td></td></tr>
-<tr><td><code>struct nn_msghdr</code></td><td><code>nng_msg</code></td><td></td></tr>
-<tr><td><code>struct nn_cmsghdr</code></td><td><code>nng_msg</code> and <code>nng_msg_header</code></td><td></td></tr>
+<tr><td><code>struct nn_msghdr</code></td><td><a href="migrate//api/msg.html#message-structure"><code>nng_msg</code></a></td><td></td></tr>
+<tr><td><code>struct nn_cmsghdr</code></td><td><a href="migrate//api/msg.html#message-structure"><code>nng_msg</code></a> and <a href="migrate//api/msg.html#message-header"><code>nng_msg_header</code></a></td><td></td></tr>
 </tbody></table>
 </div>
 <h2 id="options"><a class="header" href="#options">Options</a></h2>
@@ -5515,44 +5939,55 @@ NNG approach to messages. Likewise there is no <code>struct nn_cmsghdr</code> eq
 <tr><td><code>NN_RECONNECT_IVL_MAX</code></td><td><code>NNG_OPT_RECONNMAXT</code></td><td></td></tr>
 <tr><td><code>NN_SNDPRIO</code></td><td>None</td><td>Not supported in NNG yet.</td></tr>
 <tr><td><code>NN_RCVPRIO</code></td><td>None</td><td>Not supported in NNG yet.</td></tr>
-<tr><td><code>NN_RCVFD</code></td><td><code>nng_socket_get_recv_poll_fd</code></td><td>No longer an option, use a function call.</td></tr>
-<tr><td><code>NN_SNDFD</code></td><td><code>nng_socket_get_send_poll_fd</code></td><td>No longer an option, use a function call.</td></tr>
+<tr><td><code>NN_RCVFD</code></td><td><a href="migrate//api/sock.html#polling-socket-events"><code>nng_socket_get_recv_poll_fd</code></a></td><td>No longer an option, use a function call.</td></tr>
+<tr><td><code>NN_SNDFD</code></td><td><a href="migrate//api/sock.html#polling-socket-events"><code>nng_socket_get_send_poll_fd</code></a></td><td>No longer an option, use a function call.</td></tr>
 <tr><td><code>NN_DOMAIN</code></td><td>None</td><td>NNG options are not divided by domain or protocol.</td></tr>
-<tr><td><code>NN_PROTOCOL</code></td><td><code>nng_socket_proto_id</code></td><td>No longer an option. See also <code>nng_socket_proto_name</code>.</td></tr>
+<tr><td><code>NN_PROTOCOL</code></td><td><a href="migrate//api/sock.html#socket-identity"><code>nng_socket_proto_id</code></a></td><td>No longer an option. See also <code>nng_socket_proto_name</code>.</td></tr>
 <tr><td><code>NN_IPV4ONLY</code></td><td>None</td><td>Use URL such as <code>tcp4://</code> to obtain this functionality.</td></tr>
-<tr><td><code>NN_SOCKET_NAME</code></td><td><code>NNG_OPT_SOCKNAME</code></td><td></td></tr>
+<tr><td><code>NN_SOCKET_NAME</code></td><td>None</td><td>Removed from NNG.</td></tr>
 <tr><td><code>NN_MAXTTL</code></td><td><code>NNG_OPT_MAXTTL</code></td><td></td></tr>
-<tr><td><code>NN_SUB_SUBSCRIBE</code></td><td><code>nng_sub0_socket_subscribe</code></td><td>No longer an option, use a function call.</td></tr>
-<tr><td><code>NN_SUB_UNSUBSCRIBE</code></td><td><code>nng_sub0_socket_unsubscribe</code></td><td>No longer an option, use a function call.</td></tr>
+<tr><td><code>NN_SUB_SUBSCRIBE</code></td><td><a href="migrate//TODO.html"><code>nng_sub0_socket_subscribe</code></a></td><td>No longer an option, use a function call.</td></tr>
+<tr><td><code>NN_SUB_UNSUBSCRIBE</code></td><td><a href="migrate//TODO.html"><code>nng_sub0_socket_unsubscribe</code></a></td><td>No longer an option, use a function call.</td></tr>
 </tbody></table>
 </div>
 <h2 id="error-codes"><a class="header" href="#error-codes">Error Codes</a></h2>
 <p>Most of the error codes have similar names in NNG, just prefixed with <code>NNG_</code>.
 There are some exceptions. Be aware that the numeric values are <em>not</em> the same.</p>
 <div class="table-wrapper"><table><thead><tr><th>Nanomsg Error</th><th>NNG Error</th><th>Notes</th></tr></thead><tbody>
-<tr><td><code>EINTR</code></td><td><code>NNG_EINTR</code></td><td></td></tr>
-<tr><td><code>ENOMEM</code></td><td><code>NNG_ENOMEM</code></td><td></td></tr>
-<tr><td><code>EINVAL</code></td><td><code>NNG_EINVAL</code>, <code>NNG_EADDRINVAL</code>, <code>NNG_EBADTYPE</code>, <code>NNG_EAMBIGUOUS</code></td><td>NNG discrimates between different types of errors.</td></tr>
-<tr><td><code>EBUSY</code></td><td><code>NNG_EBUSY</code></td><td></td></tr>
-<tr><td><code>ETIMEDOUT</code></td><td><code>NNG_ETIMEDOUT</code></td><td></td></tr>
-<tr><td><code>ECONNREFUSED</code></td><td><code>NNG_ECONNREFUSED</code></td><td></td></tr>
-<tr><td><code>EBADF</code></td><td><code>NNG_ECLOSED</code>, <code>NNG_ECANCELED</code></td><td>Canceling an operation returns differently than using an invalid or closed object.</td></tr>
-<tr><td><code>EAGAIN</code></td><td><code>NNG_EAGAIN</code></td><td></td></tr>
-<tr><td><code>ENOTSUP</code></td><td><code>NNG_ENOTSUP</code></td><td></td></tr>
-<tr><td><code>EADDRINUSE</code></td><td><code>NNG_EADDRINUSE</code></td><td></td></tr>
-<tr><td><code>EFSM</code></td><td><code>NNG_ESTATE</code></td><td>Not a legal POSIX <em>errno</em> value.</td></tr>
-<tr><td><code>ENOENT</code></td><td><code>NNG_ENOENT</code></td><td></td></tr>
-<tr><td><code>EPROTO</code></td><td><code>NNG_EPROTO</code></td><td></td></tr>
-<tr><td><code>EHOSTUNREACH</code></td><td><code>NNG_EUNREACHABLE</code></td><td></td></tr>
-<tr><td><code>EACCCES</code></td><td><code>NNG_EPERM</code>, <code>NNG_EWRITEONLY</code>, <code>NNG_EREADONLY</code>, <code>NNG_ECRYPTO</code>, <code>NNG_EPEERAUTH</code></td><td>NNG has more fine grained reasons for access failures.</td></tr>
-<tr><td><code>EMSGSIZE</code></td><td><code>NNG_EMSGSIZE</code></td><td></td></tr>
-<tr><td><code>ECONNABORTED</code></td><td><code>NNG_ECONNABORTED</code></td><td></td></tr>
-<tr><td><code>ECONNRESET</code></td><td><code>NNG_ECONNRESET</code></td><td></td></tr>
-<tr><td><code>EEXIST</code></td><td><code>NNG_EEXIST</code></td><td></td></tr>
-<tr><td><code>EMFILE</code></td><td><code>NNG_ENOFILES</code></td><td></td></tr>
-<tr><td><code>ENOSPC</code></td><td><code>NNG_ENOSPC</code></td><td></td></tr>
+<tr><td><code>EINTR</code></td><td><a href="migrate//api/errors.html#NNG_EINTR"><code>NNG_EINTR</code></a></td><td></td></tr>
+<tr><td><code>ENOMEM</code></td><td><a href="migrate//api/errors.html#NNG_ENOMEM"><code>NNG_ENOMEM</code></a></td><td></td></tr>
+<tr><td><code>EINVAL</code></td><td><a href="migrate//api/errors.html#NNG_EINVAL"><code>NNG_EINVAL</code></a>, <a href="migrate//api/errors.html#NNG_EADDRINVAL"><code>NNG_EADDRINVAL</code></a>, <a href="migrate//api/errors.html#NNG_EBADTYPE"><code>NNG_EBADTYPE</code></a>, <a href="migrate//api/errors.html#NNG_EAMBIGUOUS"><code>NNG_EAMBIGUOUS</code></a></td><td>NNG discrimates between different types of errors.</td></tr>
+<tr><td><code>EBUSY</code></td><td><a href="migrate//api/errors.html#NNG_EBUSY"><code>NNG_EBUSY</code></a></td><td></td></tr>
+<tr><td><code>ETIMEDOUT</code></td><td><a href="migrate//api/errors.html#NNG_ETIMEDOUT"><code>NNG_ETIMEDOUT</code></a></td><td></td></tr>
+<tr><td><code>ECONNREFUSED</code></td><td><a href="migrate//api/errors.html#NNG_ECONNREFUSED"><code>NNG_ECONNREFUSED</code></a></td><td></td></tr>
+<tr><td><code>EBADF</code></td><td><a href="migrate//api/errors.html#NNG_ECLOSED"><code>NNG_ECLOSED</code></a>, <a href="migrate//api/errors.html#NNG_ECANCELED"><code>NNG_ECANCELED</code></a></td><td>Canceling an operation returns differently than using an invalid or closed object.</td></tr>
+<tr><td><code>EAGAIN</code></td><td><a href="migrate//api/errors.html#NNG_EAGAIN"><code>NNG_EAGAIN</code></a></td><td></td></tr>
+<tr><td><code>ENOTSUP</code></td><td><a href="migrate//api/errors.html#NNG_ENOTSUP"><code>NNG_ENOTSUP</code></a></td><td></td></tr>
+<tr><td><code>EADDRINUSE</code></td><td><a href="migrate//api/errors.html#NNG_EADDRINUSE"><code>NNG_EADDRINUSE</code></a></td><td></td></tr>
+<tr><td><code>EFSM</code></td><td><a href="migrate//api/errors.html#NNG_ESTATE"><code>NNG_ESTATE</code></a></td><td>Not a legal POSIX <em>errno</em> value.</td></tr>
+<tr><td><code>ENOENT</code></td><td><a href="migrate//api/errors.html#NNG_ENOENT"><code>NNG_ENOENT</code></a></td><td></td></tr>
+<tr><td><code>EPROTO</code></td><td><a href="migrate//api/errors.html#NNG_EPROTO"><code>NNG_EPROTO</code></a></td><td></td></tr>
+<tr><td><code>EHOSTUNREACH</code></td><td><a href="migrate//api/errors.html#NNG_EUNREACHABLE"><code>NNG_EUNREACHABLE</code></a></td><td></td></tr>
+<tr><td><code>EACCCES</code></td><td><a href="migrate//api/errors.html#NNG_EPERM"><code>NNG_EPERM</code></a>, <a href="migrate//api/errors.html#NNG_EWRITEONLY"><code>NNG_EWRITEONLY</code></a>, <a href="migrate//api/errors.html#NNG_EREADONLY"><code>NNG_EREADONLY</code></a>, <a href="migrate//api/errors.html#NNG_ECRYPTO"><code>NNG_ECRYPTO</code></a>, <a href="migrate//api/errors.html#NNG_EPEERAUTH"><code>NNG_EPEERAUTH</code></a></td><td>NNG has more fine grained reasons for access failures.</td></tr>
+<tr><td><code>EMSGSIZE</code></td><td><a href="migrate//api/errors.html#NNG_EMSGSIZE"><code>NNG_EMSGSIZE</code></a></td><td></td></tr>
+<tr><td><code>ECONNABORTED</code></td><td><a href="migrate//api/errors.html#NNG_ECONNABORTED"><code>NNG_ECONNABORTED</code></a></td><td></td></tr>
+<tr><td><code>ECONNRESET</code></td><td><a href="migrate//api/errors.html#NNG_ECONNRESET"><code>NNG_ECONNRESET</code></a></td><td></td></tr>
+<tr><td><code>EEXIST</code></td><td><a href="migrate//api/errors.html#NNG_EEXIST"><code>NNG_EEXIST</code></a></td><td></td></tr>
+<tr><td><code>EMFILE</code></td><td><a href="migrate//api/errors.html#NNG_ENOFILES"><code>NNG_ENOFILES</code></a></td><td></td></tr>
+<tr><td><code>ENOSPC</code></td><td><a href="migrate//api/errors.html#NNG_ENOSPC"><code>NNG_ENOSPC</code></a></td><td></td></tr>
 </tbody></table>
-</div><div style="break-before: page; page-break-before: always;"></div><h1 id="index"><a class="header" href="#index">Index</a></h1>
+</div>
+<h2 id="local-addresses-for-dialing"><a class="header" href="#local-addresses-for-dialing">Local Addresses for Dialing</a></h2>
+<p>The ability to specify the source address in the UROL,to use when
+using <code>nn_dial</code> inside the URL is not present in NNG. The correct
+way to specify the local address is using the <code>NNG_OPT_LOCADDR</code> option on the
+dialer before starting to dial.</p>
+<!-- Symbol cross reference -->
+<!-- Macros -->
+<!-- Protocols -->
+<!-- Transports -->
+<!-- Concept index -->
+<div style="break-before: page; page-break-before: always;"></div><h1 id="index"><a class="header" href="#index">Index</a></h1>
 <p>ABI, <a href="api/misc.html#a009">1</a><br/>
 abstract sockets, <a href="tran/ipc.html#a007">1</a><br/>
 <code>abstract://</code>, <a href="tran/ipc.html#a008">1</a><br/>
@@ -5575,6 +6010,7 @@ condition variable, <a href="api/synch.html#a009">1</a><br/>
 CPU-bound, <a href="api/thread.html#a003">1</a><br/>
 duration, <a href="api/time.html#a003">1</a><br/>
 error message, <a href="api/errors.html#a002">1</a><br/>
+event loop, <a href="api/sock.html#a009">1</a><br/>
 flow control, <a href="proto/index.html#a006">1</a><br/>
 <code>getopt</code>, <a href="api/cmd_opts.html#a003">1</a><br/>
 half-duplex, <a href="proto/index.html#a004">1</a><br/>
@@ -5628,6 +6064,7 @@ named pipes, <a href="tran/ipc.html#a004">1</a><br/>
 <code>NNG_DURATION_INFINITE</code>, <a href="api/time.html#a004">1</a><br/>
 <code>NNG_DURATION_ZERO</code>, <a href="api/time.html#a006">1</a><br/>
 <code>NNG_ECANCELED</code>, <a href="api/aio.html#a010">1</a><br/>
+<code>nng_fini</code>, <a href="api/init.html#a002">1</a><br/>
 <code>nng_free</code>, <a href="api/memory.html#a004">1</a><br/>
 <code>nng_id_alloc</code>, <a href="api/id_map.html#a006">1</a><br/>
 <code>nng_id_get</code>, <a href="api/id_map.html#a005">1</a><br/>
@@ -5637,6 +6074,7 @@ named pipes, <a href="tran/ipc.html#a004">1</a><br/>
 <code>nng_id_map_set</code>, <a href="api/id_map.html#a004">1</a><br/>
 <code>nng_id_remove</code>, <a href="api/id_map.html#a007">1</a><br/>
 <code>nng_id_visit</code>, <a href="api/id_map.html#a008">1</a><br/>
+<code>nng_init</code>, <a href="api/init.html#a001">1</a><br/>
 <code>nng_iov</code>, <a href="api/aio.html#a020">1</a><br/>
 <code>nng_log</code>, <a href="api/logging.html#a001">1</a><br/>
 <code>nng_log_auth</code>, <a href="api/logging.html#a002">1</a><br/>
@@ -5682,15 +6120,22 @@ named pipes, <a href="tran/ipc.html#a004">1</a><br/>
 <code>NNG_OPT_REQ_RESENDTICK</code>, <a href="proto/req.html#a007">1</a><br/>
 <code>NNG_OPT_REQ_RESENDTIME</code>, <a href="proto/req.html#a006">1</a><br/>
 <code>NNG_OPT_SOCKET_FD</code>, <a href="tran/socket.html#a002">1</a>, <a href="tran/socket.html#a005">2</a><br/>
-<code>NNG_OPT_SUB_PREFNEW</code>, <a href="proto/sub.html#a007">1</a><br/>
-<code>NNG_OPT_SUB_SUBSCRIBE</code>, <a href="proto/sub.html#a004">1</a><br/>
-<code>NNG_OPT_SUB_UNSUBSCRIBE</code>, <a href="proto/sub.html#a006">1</a><br/>
+<code>NNG_OPT_SUB_PREFNEW</code>, <a href="proto/sub.html#a004">1</a><br/>
 <code>NNG_OPT_SURVEYOR_SURVEYTIME</code>, <a href="proto/surveyor.html#a007">1</a><br/>
 <code>nng_opts_parse</code>, <a href="api/cmd_opts.html#a001">1</a><br/>
 <code>nng_optspec</code>, <a href="api/cmd_opts.html#a004">1</a><br/>
 <code>NNG_PATCH_VERSION</code>, <a href="api/misc.html#a008">1</a><br/>
 <code>nng_random</code>, <a href="api/misc.html#a001">1</a><br/>
 <code>nng_sleep_aio</code>, <a href="api/time.html#a011">1</a><br/>
+<code>nng_socket</code>, <a href="api/sock.html#a002">1</a><br/>
+<code>nng_socket_get_recv_poll_fd</code>, <a href="api/sock.html#a010">1</a><br/>
+<code>nng_socket_get_send_poll_fd</code>, <a href="api/sock.html#a011">1</a><br/>
+<code>nng_socket_id</code>, <a href="api/sock.html#a003">1</a><br/>
+<code>nng_socket_peer_id</code>, <a href="api/sock.html#a005">1</a><br/>
+<code>nng_socket_peer_name</code>, <a href="api/sock.html#a007">1</a><br/>
+<code>nng_socket_proto_id</code>, <a href="api/sock.html#a004">1</a><br/>
+<code>nng_socket_proto_name</code>, <a href="api/sock.html#a006">1</a><br/>
+<code>nng_socket_raw</code>, <a href="api/sock.html#a008">1</a><br/>
 <code>nng_stat</code>, <a href="api/stats.html#a002">1</a><br/>
 <code>nng_stat_bool</code>, <a href="api/stats.html#a021">1</a><br/>
 <code>NNG_STAT_BOOLEAN</code>, <a href="api/stats.html#a018">1</a><br/>
@@ -5729,9 +6174,17 @@ named pipes, <a href="tran/ipc.html#a004">1</a><br/>
 <code>NNG_UNIT_MESSAGES</code>, <a href="api/stats.html#a026">1</a><br/>
 <code>NNG_UNIT_MILLIS</code>, <a href="api/stats.html#a027">1</a><br/>
 <code>NNG_UNIT_NONE</code>, <a href="api/stats.html#a024">1</a><br/>
-<code>nng_url_clone</code>, <a href="api/url.html#a004">1</a><br/>
-<code>nng_url_free</code>, <a href="api/url.html#a005">1</a><br/>
-<code>nng_url_parse</code>, <a href="api/url.html#a003">1</a><br/>
+<code>nng_url_clone</code>, <a href="api/url.html#a012">1</a><br/>
+<code>nng_url_fragment</code>, <a href="api/url.html#a009">1</a><br/>
+<code>nng_url_free</code>, <a href="api/url.html#a013">1</a><br/>
+<code>nng_url_hostname</code>, <a href="api/url.html#a005">1</a><br/>
+<code>nng_url_parse</code>, <a href="api/url.html#a011">1</a><br/>
+<code>nng_url_path</code>, <a href="api/url.html#a007">1</a><br/>
+<code>nng_url_port</code>, <a href="api/url.html#a006">1</a><br/>
+<code>nng_url_query</code>, <a href="api/url.html#a008">1</a><br/>
+<code>nng_url_scheme</code>, <a href="api/url.html#a003">1</a><br/>
+<code>nng_url_sprintf</code>, <a href="api/url.html#a010">1</a><br/>
+<code>nng_url_userinfo</code>, <a href="api/url.html#a004">1</a><br/>
 <code>nng_version</code>, <a href="api/misc.html#a004">1</a><br/>
 <em>PAIR</em>, <a href="proto/pair.html#a002">1</a><br/>
 <em>PAIR</em> protocol, <a href="proto/pair.html#a001">1</a><br/>
@@ -5756,12 +6209,12 @@ request/reply pattern, <a href="proto/rep.html#a003">1</a>, <a href="proto/req.h
 <em>RESPONDENT</em> protocol, <a href="proto/respondent.html#a001">1</a><br/>
 scheduling, <a href="api/time.html#a010">1</a><br/>
 service discovery, <a href="proto/surveyor.html#a006">1</a><br/>
+socket, <a href="api/sock.html#a001">1</a><br/>
 <em>socket</em> transport, <a href="tran/socket.html#a001">1</a><br/>
 <code>socket://</code>, <a href="tran/socket.html#a003">1</a><br/>
 statistics, <a href="api/stats.html#a001">1</a><br/>
 <em>SUB</em>, <a href="proto/sub.html#a002">1</a><br/>
 <em>SUB</em> protocol, <a href="proto/sub.html#a001">1</a><br/>
-subscribe, <a href="proto/sub.html#a005">1</a><br/>
 subscriber, <a href="proto/sub.html#a003">1</a><br/>
 survey pattern, <a href="proto/respondent.html#a003">1</a>, <a href="proto/surveyor.html#a003">2</a><br/>
 <em>SURVEYOR</em>, <a href="proto/surveyor.html#a002">1</a><br/>

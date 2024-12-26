@@ -3,7 +3,7 @@
     <head>
         <!-- Book generated using mdBook -->
         <meta charset="UTF-8">
-        <title>ID Map - NNG Reference Manual (DRAFT)</title>
+        <title>Initialization - NNG Reference Manual (DRAFT)</title>
 
 
         <!-- Custom HTML head -->
@@ -220,143 +220,93 @@
 }
 
 </style>
-<h1 id="id-map"><a class="header" href="#id-map">ID Map</a></h1>
-<p>Internally, <em>NNG</em> uses a map of numeric identifiers to data structures.
-This feature is also exposed for application use, as a “supplemental” feature.</p>
-<p>When using these functions, it is necessary to add the <code>#include &lt;nng/supplemental/util/idhash.h&gt;</code>
-include file to list of includes.</p>
-<h2 id="id-map-structure"><a class="header" href="#id-map-structure">ID Map Structure</a></h2>
-<pre><code class="language-c">#include &lt;nng/nng.h&gt;
-#include &lt;nng/supplemental/util/idhash.h&gt;
+<h1 id="initialization--finalization"><a class="header" href="#initialization--finalization">Initialization &amp; Finalization</a></h1>
+<p>This chapter details the function used to initialize
+the library before first use, and the funtion used to
+finalize the library and deallocate any resources used by the library.</p>
+<h2 id="initialization"><a class="header" href="#initialization">Initialization</a></h2>
+<pre><code class="language-c">typedef struct {
+    int16_t num_task_threads;
+    int16_t max_task_threads;
+    int16_t num_expire_threads;
+    int16_t max_expire_threads;
+    int16_t num_poller_threads;
+    int16_t max_poller_threads;
+    int16_t num_resolver_threads;
+} nng_init_params;
 
-typedef struct nng_id_map_s nng_id_map;
+extern int nng_init(nng_init_parms *params);
 </code></pre>
-<p>The ID map structure, <a name="a001"></a><code>nng_id_map</code> provides a table of identifiers mapping
-to user-supplied pointers (which must not be <code>NULL</code>). The identifiers can be
-thought of as indices into the table, with the pointers providing the reference
-for the user supplied data.</p>
-<p>The values of identifiers can be supplied by the user, or can be allocated automatically
-by <code>nng_id_map</code> from a predefined range. The starting point for allocations
-can also be randomly within the range.</p>
-<p>The identifiers are 64-bit unsigned integers and can be sparse; the structure
-will use space efficiently even if identifiers are very far apart.
-<sup><a name="to-footnote-1"><a href="#footnote-1">1</a></a></sup></p>
-<div class="mdbook-alerts mdbook-alerts-important">
-<p class="mdbook-alerts-title">
-  <span class="mdbook-alerts-icon"></span>
-  important
-</p>
-<p>The function available for <code>nng_id_map</code> are <em>not</em> thread-safe.
-Callers should use a <a href="/api/synch.html#mutual-exclusion-lock">mutex</a> or similar approach when thread-safety is needed.</p>
-</div>
-<h2 id="create-id-map"><a class="header" href="#create-id-map">Create ID Map</a></h2>
-<pre><code class="language-c">#define NNG_MAP_RANDOM 1
-
-int nng_id_map_alloc(nng_id_map **map_p, uint64_t lo, uint64_t hi, int flags);
-</code></pre>
-<p>The <a name="a002"></a><code>nng_id_map_alloc</code> function allocates a map without any data in it,
-and returns a pointer to it in <em>map_p</em>. When allocating identifiers dynamically,
-the values will be chosen from the range defined by <em>lo</em> and <em>hi</em>, inclusive.</p>
-<p>The <em>flags</em> argument is a bit mask of flags that can adjust behavior of the map.
-The only flag defined at present
-is <code>NNG_MAP_RANDOM</code>, which causes the first identifier allocation to start at a random
-point within the range.
-This is useful to reduce the odds of different instances of an application using
-the same identifiers at the same time.</p>
-<p>If both <em>lo</em> and <em>hi</em> are zero, then the values <code>0</code> and <code>0xffffffff</code> are substituted
-in their place, giving a full range of 32-bit identifiers.</p>
-<p>This function can return <a href="/api/errors.html#NNG_ENOMEM"><code>NNG_ENOMEM</code></a> if it is unable to allocate resources, otherwise
-it returns zero on success.</p>
-<h2 id="destroy-map"><a class="header" href="#destroy-map">Destroy Map</a></h2>
-<pre><code class="language-c">void nng_id_map_free(nng_id_map *map);
-</code></pre>
-<p>The <a name="a003"></a><code>nng_id_map_free</code> function destroys <em>map</em>, releasing any resources associated
-with it.</p>
+<p>Before using other interfaces in this library, it is necessary to initialize
+the library. The <a name="a001"></a><code>nng_init</code> function performs this initialization.</p>
+<p>The function is idempotent, although on tear down, every call to <code>nng_init</code> must
+be paired with a call to <a href="/api/init.html#finalization"><code>nng_fini</code></a> or no resources will be released.
+This allows for libraries consuming these interfaces to safely initialize and finalize
+the library without disrupting other consumers in the same process.</p>
+<p>Further, only the first call to this function may have a value of <em>params</em> other than <code>NULL</code>.
+If <em>params</em> is not <code>NULL</code>, and the library has already been intiazed, then <code>nng_init</code> will
+return <a href="/api/errors.html#NNG_EBUSY"><code>NNG_EBUSY</code></a>.</p>
+<p>In some cases it is desirable to tune certain runtime parameters for the library, which
+can be done by supplying a non-<code>NULL</code> <em>params</em> argument.</p>
+<h3 id="parameters"><a class="header" href="#parameters">Parameters</a></h3>
+<p>The individual fields of the <code>nng_init_params</code> structure can be used to adjust certain
+runtime tunables for the library. There is no guarantee that these tunables are implemented,
+and applications should not depend upon them for correct operation.</p>
+<p>Any member of <code>nng_init_params</code> that is set to zero will be ignored, and any built in default
+will be used instead for that value.</p>
 <div class="mdbook-alerts mdbook-alerts-note">
 <p class="mdbook-alerts-title">
   <span class="mdbook-alerts-icon"></span>
   note
 </p>
-<p>The <code>nng_id_map_free</code> frees the map itself, but will not free memory associated with
-any strctures contained within it.</p>
+<p>Applications should make sure that structure is zero initialized before calling <code>nng_init</code>.</p>
 </div>
-<h2 id="store-a-value"><a class="header" href="#store-a-value">Store a Value</a></h2>
-<pre><code class="language-c">int nng_id_set(nng_id_map *map, uint64_t id, void *value);
+<p>The following parameters are present:</p>
+<ul>
+<li>
+<p><code>num_task_threads</code> and <code>max_task_threads</code> <br />
+Configures the number of threads to use for tasks, which are used principally for completion
+callbacks. The maximum value can be used to provide an upper limit while still allowing
+for a dynamically calculated value to be used, as long as it does not exceeed the maximum.</p>
+</li>
+<li>
+<p><code>num_expire_threads</code> and <code>max_expire_threads</code> <br />
+Configures the number of threads used for expiring operations. Using a larger value will
+reduce contention on some common locks, and may improve performance.</p>
+</li>
+<li>
+<p><code>num_poller_threads</code> and <code>max_poller_threads</code> <br />
+Configures the number of threads to be used for performing I/O. Not all configurations support
+changing these values.</p>
+</li>
+<li>
+<p><code>num_resolver_threads</code> <br />
+Changes the number of threads used for asynchronous DNS look ups.</p>
+</li>
+</ul>
+<h2 id="finalization"><a class="header" href="#finalization">Finalization</a></h2>
+<pre><code class="language-c">extern void nng_init(nng_init_parms *params);
 </code></pre>
-<p>The <a name="a004"></a><code>nng_id_map_set</code> function is used to store the <em>value</em> in the <em>map</em> at
-index <em>id</em>.</p>
-<p>If another value is already stored at that same location, then it is overwritten with
-<em>value</em>.</p>
-<div class="mdbook-alerts mdbook-alerts-note">
-<p class="mdbook-alerts-title">
-  <span class="mdbook-alerts-icon"></span>
-  note
-</p>
-<p>The <em>value</em> must not be <code>NULL</code>.</p>
-</div>
-<p>If the table has to grow to accommodate this value, it may fail if insufficient
-memory is available, returning <a href="/api/errors.html#NNG_ENOMEM"><code>NNG_ENOMEM</code></a>. Otherwise it returns zero.</p>
-<h2 id="lookup-a-value"><a class="header" href="#lookup-a-value">Lookup a Value</a></h2>
-<pre><code class="language-c">void *nng_id_get(nng_id_map *map, uint64_t id);
-</code></pre>
-<p>The <a name="a005"></a><code>nng_id_get</code> function looks up the entry for <em>id</em> in <em>map</em>, returning the
-associated value if present, or <code>NULL</code> if no such entry exists.</p>
-<h2 id="allocate-an-id"><a class="header" href="#allocate-an-id">Allocate an ID</a></h2>
-<pre><code class="language-c">int nng_id_alloc(nng_id_map *map, uint64_t *id_p, void *value);
-</code></pre>
-<p>The <a name="a006"></a><code>nng_id_alloc</code> stores the <em>value</em> in the <em>map</em>, at a newly allocated index,
-and returns the index in <em>id_p</em>.</p>
-<p>Identifiers are allocated in increasing order, without reusing old identifiers until the
-largest possible identifier is allocated. After wrapping, only identifiers that are no longer
-in use will be considered.
-No effort is made to order the availability of identifiers based on
-when they were freed.<sup><a name="to-footnote-2"><a href="#footnote-2">2</a></a></sup></p>
-<p>As with <a href="/api/id_map.html#store-a-value"><code>nng_id_set</code></a>, this may need to allocate memory and can thus
-fail with <a href="/api/errors.html#NNG_ENOMEM"><code>NNG_ENOMEM</code></a>.</p>
-<p>Additionally, if there are no more free identifiers within the range specified
-when <em>map</em> was created, then it will return <a href="/api/errors.html#NNG_ENOSPC"><code>NNG_ENOSPC</code></a>.</p>
-<p>Otherwise it returns zero, indicating success.</p>
-<h2 id="remove-an-id"><a class="header" href="#remove-an-id">Remove an ID</a></h2>
-<pre><code class="language-c">int nng_id_remove(nng_id_map *map, uint64_t id);
-</code></pre>
-<p>The <a name="a007"></a><code>nng_id_remove</code> removes the entry at index <em>id</em> from <em>map</em>.</p>
-<p>If no such entry exist, it will return <a href="/api/errors.html#NNG_ENOENT"><code>NNG_ENOENT</code></a>. Otherwise it returns zero.</p>
-<h2 id="iterating-ids"><a class="header" href="#iterating-ids">Iterating IDs</a></h2>
-<pre><code class="language-c">bool nng_id_visit(nng_id_map *map, uint64_t *id_p, void **value_p, uint32_t *cursor);
-</code></pre>
-<p>The <a name="a008"></a><code>nng_id_visit</code> function is used to iterate over all items in the table.
-The caller starts the iteration by setting the <em>cursor</em> to 0 before calling it.
-For each call, the associated key and value of the next item will be returned in <em>id_p</em>,
-and <em>value_p</em> and the <em>cursor</em> will be updated.
-When all items have been iterated, the function returns <code>false</code>.
-The order of items returned is not guaranteed to be sequential.
-The caller must not attempt to derive any value of the <em>cursor</em> as it refers to internal table indices.</p>
-<p>Entries may be safely removed from <em>map</em> while iterating.</p>
-<p>However, if new entries are added to the table while iterating, the result of
-iteration is undefined; entries may be repeated or omitted during such an iteration.</p>
-<p>The caller must not attempt to derive any value of the <em>cursor</em> as it refers to internal
-table indices.</p>
+<p>When the consumer is ready to deallocate any resoures allocated by the library, it should call
+the <a name="a002"></a><code>nng_fini</code> function. Each call to <code>nng_fini</code> should be paired with an earlier call to
+<a href="/api/init.html#initialization"><code>nng_init</code></a>.</p>
+<p>After calling <code>nng_fini</code>, the consuming application must not make any other calls to NNG functions,
+except that it may use <code>nng_init</code> to initialize the application for further use.</p>
 <!-- Symbol cross reference -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->
 <!-- Concept index -->
-<p><hr/>
-<p><a name="footnote-1"><a href="#to-footnote-1">1</a></a>: The ID map is capable of storing at most 2<sup>32</sup> identifiers, even though the identifers may
-themselves be much larger than this.</p>
-<p><a name="footnote-2"><a href="#to-footnote-2">2</a></a>: The concern about possibly reusing a
-recently released identifier comes into consideration after the range has wrapped.
-Given a sufficiently large range, this is unlikely to be a concern.</p>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../api/misc.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../api/index.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../api/cmd_opts.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../api/msg.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -366,11 +316,11 @@ Given a sufficiently large range, this is unlikely to be a concern.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../api/misc.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../api/index.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../api/cmd_opts.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../api/msg.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

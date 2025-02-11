@@ -18,6 +18,7 @@
 
 #include "core/defs.h"
 #include "core/nng_impl.h"
+#include "deos_impl.h"
 
 void
 nni_resolv(nni_resolv_item *item, nni_aio *aio)
@@ -32,47 +33,70 @@ nni_resolv(nni_resolv_item *item, nni_aio *aio)
 	if (item->ri_host == NULL) {
 		if (item->ri_passive) {
 			item->ri_sa->s_in.sa_addr = 0; // INADDR_ANY
-			item->ri_sa->s_in.sa_port = htons(item->ri_port);
+			item->ri_sa->s_in.sa_port = nni_htons(item->ri_port);
 			nng_aio_finish(aio, 0);
 			return;
 		}
-		nng_aio_finish_error(aio, NNG_EADDRINVAL);
+		nng_aio_finish(aio, NNG_EADDRINVAL);
 		return;
 	}
 
-	char ip_str[16];
-	if (strlen(item->ri_host > 15) {
-		nng_aio_finish_error(aio, NNG_EADDRINVAL);
-	}
-	strncpy(ip_str, item->host, sizeof (item->host));
-	ip_str[sizeof(ip_str)-1] = 0;
-
-	char *sep = ".";
-	char *last = NULL;
-	char *str = item->ri_host;
-	uint8_t bytes[4] ;
-
-	item->ri_sa.sa_addr = 0;
-	for (int i = 0; i < 4; i++) {
-		char *octet = strtok_r(str, ".", &last);
-		long  value;
-		if (octet == NULL) {
-			nng_aio_finish_error(aio, NNG_EADDRINVAL);
+	// NB: There is no validation of the address here.  We could
+	// check it, but given limitations of this platform, it is
+	// probably better not to bother.  Note also DEOS uses native
+	// byte order in their socket addresses, but NNG follows the
+	// more usual convention of network byte order here.  This will
+	// result in a double conversion, but it ensures that NNG applications
+	// behave as expected.
+	item->ri_sa->s_in.sa_addr = nni_htonl(inet_addr(item->ri_host));
+	if (item->ri_passive) {
+		// Bad parse may return INADDR_NONE, which we
+		// absolutely cannot bind to.  Just fail.
+		if (item->ri_sa->s_in.sa_addr == 0xFFFFFFFF) {
+			nng_aio_finish(aio, NNG_EADDRINVAL);
 			return;
 		}
-		char *endp = NULL;
-		value      = strtol(octet, &endp, 10);
-		if ((*endp != 0) || (value < 0) || (value > 255)) {
-			nng_aio_finish_error(aio, NNG_EADDRINVAL);
+	} else {
+		// We cannot send to an unspecified address either,
+		// but we might be able to send to the all 1's broadcast...
+		if (item->ri_sa->s_in.sa_addr == 0) {
+			nng_aio_finish(aio, NNG_EADDRINVAL);
+			return;
 		}
-		bytes[i] = value;
-		str      = NULL;
 	}
+	nng_aio_finish(aio, 0);
+}
 
-	// inherently network order
-	memcpy(&item->ri_sa.sa_addr, bytes, 4);
+int
+nni_parse_ip(const char *addr, nng_sockaddr *sa)
+{
+	sa->s_in.sa_addr = nni_htonl(inet_addr(addr));
+}
 
-	nni_aio_finish(aio, 0, 0);
+int
+nni_parse_ip_port(const char *addr, nni_sockaddr *sa)
+{
+	char  ipbuf[32]; // only IPv4 (15), plus ":port" (6)
+	char *colon;
+
+	strncpy(ipbuf, addr, sizeof(ipbuf));
+	if ((colon = strchr(ipbuf, ":")) == NULL) {
+		return (NNG_EADDRINVAL);
+	}
+	if (colon != NULL) {
+		*colon = 0;
+		colon++;
+		sa->s_in.sa_port = nni_htons(atoi(colon));
+	}
+	sa->s_in.sa_addr = nni_htonl(inet_addr(ipbuf));
+	return (0);
+}
+
+int
+nni_get_port_by_name(const char *name, uint32_t *portp)
+{
+	*portp = atoi(name) & 0xffff;
+	return (0);
 }
 
 #endif

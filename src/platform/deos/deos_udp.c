@@ -99,12 +99,12 @@ nni_udp_dorecv(nni_plat_udp *udp)
 	nni_list *q = &udp->udp_recvq;
 	// While we're able to recv, do so.
 	while ((aio = nni_list_first(q)) != NULL) {
-		unsigned                niov;
-		nng_iov                *aiov;
-		struct sockaddr_storage ss;
-		nng_sockaddr           *sa;
-		int                     rv  = 0;
-		int                     cnt = 0;
+		unsigned           niov;
+		nng_iov           *aiov;
+		struct sockaddr_in ss;
+		nng_sockaddr      *sa;
+		int                rv  = 0;
+		int                cnt = 0;
 
 		nni_aio_get_iov(aio, &niov, &aiov);
 		NNI_ASSERT(niov <= NNI_AIO_MAX_IOV);
@@ -146,7 +146,7 @@ nni_udp_dosend(nni_plat_udp *udp)
 
 	// While we're able to send, do so.
 	while ((aio = nni_list_first(q)) != NULL) {
-		struct sockaddr_storage ss;
+		struct sockaddr_in ss;
 
 		int      salen;
 		int      rv  = 0;
@@ -214,7 +214,7 @@ nni_plat_udp_open(nni_plat_udp **upp, nni_sockaddr *bindaddr)
 	nni_aio_list_init(&udp->udp_sendq);
 	NNI_LIST_NODE_INIT(&udp->udp_node);
 
-	udp->udp_fd = socket(sa.ss_family, SOCK_DGRAM, IPPROTO_UDP);
+	udp->udp_fd = socket(sa.sin_family, SOCK_DGRAM, IPPROTO_UDP);
 	if (udp->udp_fd < 0) {
 		rv = nni_plat_errno(errno);
 		NNI_FREE_STRUCT(udp);
@@ -294,71 +294,19 @@ nni_plat_udp_send(nni_plat_udp *udp, nni_aio *aio)
 int
 nni_plat_udp_sockname(nni_plat_udp *udp, nni_sockaddr *sa)
 {
-	struct sockaddr_in ss;
-	socklen_t          sz;
-
-	sz = sizeof(ss);
-	if (getsockname(udp->udp_fd, (struct sockaddr *) &ss, &sz) < 0) {
-		return (nni_plat_errno(errno));
-	}
-	return (nni_deos_sockaddr2nn(sa, &ss, sz));
-}
-
-// Joining a multicast group is different than binding to a multicast
-// group.  This allows to receive both unicast and multicast at the given
-// address.
-static int
-ip4_multicast_member(nni_plat_udp *udp, struct sockaddr *sa, bool join)
-{
-	struct ip_mreq          mreq;
-	struct sockaddr_in     *sin;
-	struct sockaddr_storage local;
-	socklen_t               sz = sizeof(local);
-
-	if (getsockname(udp->udp_fd, (struct sockaddr *) &local, &sz) >= 0) {
-		if (local.ss_family != AF_INET) {
-			// address families have to match
-			return (NNG_EADDRINVAL);
-		}
-		sin                       = (struct sockaddr_in *) &local;
-		mreq.imr_interface.s_addr = sin->sin_addr.s_addr;
-	} else {
-		mreq.imr_interface.s_addr = INADDR_ANY;
-	}
-
-	// Determine our local interface
-	sin = (struct sockaddr_in *) sa;
-
-	mreq.imr_multiaddr.s_addr = sin->sin_addr.s_addr;
-	if (setsockopt(udp->udp_fd, IPPROTO_IP,
-	        join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP, &mreq,
-	        sizeof(mreq)) == 0) {
-		return (0);
-	}
-	return (nni_plat_errno(errno));
+	NNI_ARG_UNUSED(udp);
+	NNI_ARG_UNUSED(sa);
+	return (NNG_ENOTSUP);
 }
 
 int
 nni_plat_udp_multicast_membership(
     nni_plat_udp *udp, nni_sockaddr *sa, bool join)
 {
-	struct sockaddr_storage ss;
-	socklen_t               sz;
-	int                     rv;
-
-	sz = nni_posix_nn2sockaddr(&ss, sa);
-	if (sz < 1) {
-		return (NNG_EADDRINVAL);
-	}
-	switch (ss.ss_family) {
-	case AF_INET:
-		rv = ip4_multicast_member(udp, (struct sockaddr *) &ss, join);
-		break;
-	default:
-		rv = NNG_EADDRINVAL;
-	}
-
-	return (rv);
+	NNI_ARG_UNUSED(udp);
+	NNI_ARG_UNUSED(sa);
+	NNI_ARG_UNUSED(join);
+	return (NNG_ENOTSUP);
 }
 
 // This is a fairly simple thread.  It never shuts down!

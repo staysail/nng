@@ -1,5 +1,5 @@
 #
-# Copyright 2024 Staysail Systems, Inc. <info@staystail.tech>
+# Copyright 2025 Staysail Systems, Inc. <info@staystail.tech>
 #
 # This software is supplied under the terms of the MIT License, a
 # copy of which should be located in the distribution where this
@@ -12,6 +12,7 @@ nng_directory(platform)
 
 add_subdirectory(posix)
 add_subdirectory(windows)
+add_subdirectory(deos)
 
 nng_test(files_test)
 nng_test(ipc_stream_test)

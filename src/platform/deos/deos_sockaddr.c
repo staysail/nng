@@ -8,11 +8,29 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include "core/nng_impl.h"
-
 #ifdef NNG_PLATFORM_DEOS
 
+#include "core/nng_impl.h"
 #include <dw_socket.h>
+
+// htonl and htons variants supplied as we don't know what the system offers.
+// Note also, that DEOS uses *NATIVE* byte order in sockaddrs, unlike the
+// entire rest of the BSD Socket using universe.
+
+uint16_t
+nni_htons(uint16_t in)
+{
+	in = ((in / 0x100) + ((in % 0x100) * 0x100));
+	return (in);
+}
+
+uint32_t
+nni_htonl(uint32_t in)
+{
+	in = ((in >> 24u) & 0xffu) | ((in >> 8u) & 0xff00u) |
+	    ((in << 8u) & 0xff0000u) | ((in << 24u) & 0xff000000u);
+	return (in);
+}
 
 // For DEOS, we only support IPv4 address (used for UDP only).
 
@@ -31,8 +49,8 @@ nni_deos_nn2sockaddr(void *sa, const nni_sockaddr *na)
 		nsin = &na->s_in;
 		memset(sin, 0, sizeof(*sin));
 		sin->sin_family      = AF_INET;
-		sin->sin_port        = nsin->sa_port;
-		sin->sin_addr.s_addr = nsin->sa_addr;
+		sin->sin_port        = nni_ntohs(nsin->sa_port);
+		sin->sin_addr.s_addr = nni_ntohl(nsin->sa_addr);
 		return (sizeof(*sin));
 	}
 	return (0);
@@ -52,8 +70,8 @@ nni_deos_sockaddr2nn(nni_sockaddr *na, const void *sa, size_t sz)
 		sin             = (void *) sa;
 		nsin            = &na->s_in;
 		nsin->sa_family = NNG_AF_INET;
-		nsin->sa_port   = sin->sin_port;
-		nsin->sa_addr   = sin->sin_addr.s_addr;
+		nsin->sa_port   = nni_htons(sin->sin_port);
+		nsin->sa_addr   = nni_htonl(sin->sin_addr.s_addr);
 		break;
 
 	default:

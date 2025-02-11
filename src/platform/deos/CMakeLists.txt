@@ -14,9 +14,6 @@
 # the static library unless they also go into the dynamic.
 if (NNG_PLATFORM_DEOS)
 
-    nng_find_package(Threads)
-    nng_link_libraries(Threads::Threads)
-
     # NB: This also depends on libethernet and libarch_
     nng_link_libraries(libdwsockets)
 
@@ -37,9 +34,11 @@ if (NNG_PLATFORM_DEOS)
             deos_file.c
             deos_ipc.c
             deos_pipe.c
+            deos_random.c
             deos_resolv.c
             deos_sockaddr.c
             deos_sockfd.c
+            deos_socketpair.c
             deos_tcp.c
             deos_thread.c
             deos_udp.c

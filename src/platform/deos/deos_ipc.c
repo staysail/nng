@@ -9,6 +9,7 @@
 #ifdef NNG_PLATFORM_DEOS
 
 // We don't support IPC (UNIX domain sockets) on this platform.
+#include "core/stream.h"
 
 int
 nni_ipc_listener_alloc(nng_stream_listener **lp, const nng_url *url)

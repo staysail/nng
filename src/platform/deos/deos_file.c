@@ -26,6 +26,7 @@ nni_plat_file_put(const char *name, const void *data, size_t len)
 	NNI_ARG_UNUSED(name);
 	NNI_ARG_UNUSED(data);
 	NNI_ARG_UNUSED(size);
+	NNI_ARG_UNUSED(len);
 	return (NNG_ENOTSUP);
 }
 
@@ -86,7 +87,6 @@ void
 nni_plat_file_unlock(nni_plat_flock *lk)
 {
 	NNI_ARG_UNUSED(lk);
-	return (NNG_ENOTSUP);
 }
 
 char *

@@ -12,6 +12,8 @@
 // need them as they are only used for integration into poll or select
 // loops, which is not a feature we support for DEOS.
 
+#include "core/nng_impl.h"
+
 int
 nni_plat_pipe_open(int *wfd, int *rfd)
 {

@@ -184,7 +184,7 @@ nni_plat_thr_init(nni_plat_thr *thr, void (*fn)(void *), void *arg)
 void
 nni_plat_thr_fini(nni_plat_thr *thr)
 {
-	pthread_join(thr->tid, NULL));
+	pthread_join(thr->tid, NULL);
 }
 
 bool
@@ -203,7 +203,7 @@ nni_plat_thr_set_name(nni_plat_thr *thr, const char *name)
 int
 nni_plat_init(nng_init_params *params)
 {
-	int rv;
+	int rv = 0;
 
 	if ((pthread_mutexattr_init(&nni_mxattr) != 0) ||
 	    (pthread_condattr_init(&nni_cvattr) != 0) ||

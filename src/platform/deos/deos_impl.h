@@ -57,10 +57,6 @@ struct nni_plat_flock {
 
 #define NNG_PLATFORM_DIR_SEP "/"
 
-#ifndef NNG_HAVE_STDATOMIC
-#define NNG_HAVE_STDATOMIC
-#endif // NNG_HAVE_STDATOMIC
-
 #include <stdatomic.h>
 
 struct nni_atomic_flag {
@@ -83,27 +79,14 @@ struct nni_atomic_ptr {
 	atomic_uintptr_t v;
 };
 
-#else // NNG_HAVE_C11_ATOMIC
-struct nni_atomic_flag {
-	bool f;
-};
-
-struct nni_atomic_bool {
-	bool b;
-};
-
-struct nni_atomic_int {
-	int v;
-};
-
-struct nni_atomic_u64 {
-	uint64_t v;
-};
-
-struct nni_atomic_ptr {
-	void *v;
-};
-
 void nni_udp_init(void *arg);
+
+// Normally this is present especially for IPv6, but Deos misses it.
+#ifndef AF_UNSPEC
+#define AF_UNSPEC 0
+#endif
+
+uint16_t nni_htons(uint16_t in);
+uint32_t nni_htonl(uint32_t in);
 
 #endif // PLATFORM_DEOS_IMPL_H

@@ -49,7 +49,7 @@ nni_deos_nn2sockaddr(void *sa, const nni_sockaddr *na)
 		nsin = &na->s_in;
 		memset(sin, 0, sizeof(*sin));
 		sin->sin_family      = AF_INET;
-		sin->sin_port        = nni_ntohs(nsin->sa_port);
+		sin->sin_port        = nsin->sa_port;
 		sin->sin_addr.s_addr = nni_ntohl(nsin->sa_addr);
 		return (sizeof(*sin));
 	}
@@ -70,7 +70,7 @@ nni_deos_sockaddr2nn(nni_sockaddr *na, const void *sa, size_t sz)
 		sin             = (void *) sa;
 		nsin            = &na->s_in;
 		nsin->sa_family = NNG_AF_INET;
-		nsin->sa_port   = nni_htons(sin->sin_port);
+		nsin->sa_port   = sin->sin_port;
 		nsin->sa_addr   = nni_htonl(sin->sin_addr.s_addr);
 		break;
 

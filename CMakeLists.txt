@@ -287,7 +287,7 @@ elseif (CMAKE_SYSTEM_NAME MATCHES "QNX")
     set(NNG_PLATFORM_POSIX ON)
 
 elseif (CMAKE_SYSTEM_NAME MATCHES "Deos")
-    add_definitions(-DNNG_PLATFORM_DEOS
+    add_definitions(-DNNG_PLATFORM_DEOS)
     set(NNG_PLATFORM_DEOS ON)
 
 else ()

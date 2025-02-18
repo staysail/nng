@@ -234,9 +234,7 @@ The memory will be 64-bit aligned.
 Note that the memory may have random data in it, just like with <code>malloc</code>.</p>
 <p>If memory cannot be allocated for any reason, then <code>NULL</code> will be returned.
 Applications that experience this should treat this like <a href="/api/errors.html#NNG_ENOMEM"><code>NNG_ENOMEM</code></a>.</p>
-<p>Memory returned by <code>nng_alloc</code> can be used to hold message buffers, in which
-case it can be directly passed to <a href="/TODO.html"><code>nng_send</code></a> using the flag <code>NNG_FLAG_ALLOC</code>.
-Alternatively, it can be freed when no longer needed using <a href="/api/memory.html#deallocate-memory"><code>nng_free</code></a>.</p>
+<p>Memory returned by <code>nng_alloc</code> should be freed when no longer needed using <a href="/api/memory.html#deallocate-memory"><code>nng_free</code></a>.</p>
 <div class="mdbook-alerts mdbook-alerts-important">
 <p class="mdbook-alerts-title">
   <span class="mdbook-alerts-icon"></span>
@@ -271,6 +269,7 @@ one (for the <code>NUL</code> terminating byte).</p>
 can be used to deallocate strings allocated with <a href="/api/memory.html#duplicate-string"><code>nng_strdup</code></a>.</p>
 <p>It is effectively the same as <code>nng_free(strlen(str) + 1)</code>.</p>
 <!-- Symbol cross reference -->
+<!-- HTTP -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->
@@ -280,7 +279,7 @@ can be used to deallocate strings allocated with <a href="/api/memory.html#dupli
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="../api/sock.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="../api/pipe.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
@@ -294,7 +293,7 @@ can be used to deallocate strings allocated with <a href="/api/memory.html#dupli
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="../api/sock.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="../api/pipe.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <i class="fa fa-angle-left"></i>
                     </a>
 

@@ -235,7 +235,7 @@ finalize the library and deallocate any resources used by the library.</p>
     int16_t num_resolver_threads;
 } nng_init_params;
 
-extern int nng_init(nng_init_parms *params);
+extern nng_err nng_init(nng_init_parms *params);
 </code></pre>
 <p>Before using other interfaces in this library, it is necessary to initialize
 the library. The <a name="a001"></a><code>nng_init</code> function performs this initialization.</p>
@@ -293,6 +293,7 @@ the <a name="a002"></a><code>nng_fini</code> function. Each call to <code>nng_fi
 <p>After calling <code>nng_fini</code>, the consuming application must not make any other calls to NNG functions,
 except that it may use <code>nng_init</code> to initialize the application for further use.</p>
 <!-- Symbol cross reference -->
+<!-- HTTP -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->

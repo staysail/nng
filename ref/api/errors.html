@@ -221,15 +221,25 @@
 
 </style>
 <h1 id="errors"><a class="header" href="#errors">Errors</a></h1>
+<pre><code class="language-c">typedef enum ... nng_err;
+</code></pre>
 <p>Many <em>NNG</em> functions can fail for a variety of reasons.
 These functions tend to return either zero on success,
 or a non-zero error code to indicate failure.
 <sup><a name="to-footnote-1"><a href="#footnote-1">1</a></a></sup></p>
-<p>All these error codes are <code>int</code>.</p>
+<p>All these error codes are <code>nng_err</code>.</p>
+<div class="mdbook-alerts mdbook-alerts-note">
+<p class="mdbook-alerts-title">
+  <span class="mdbook-alerts-icon"></span>
+  note
+</p>
+<p>Many APIs are still using <code>int</code>, but the <code>nng_err</code> enumeration can be used
+instead, and will help with debugging.</p>
+</div>
 <p>Not every possible error code is defined here, as sometimes
 an underlying system or library error code is “wrapped”.</p>
 <h2 id="human-readable-error-message"><a class="header" href="#human-readable-error-message">Human Readable Error Message</a></h2>
-<pre><code class="language-c">const char *nng_strerror(int err);
+<pre><code class="language-c">const char *nng_strerror(nng_err err);
 </code></pre>
 <p>The <a name="a001"></a><code>nng_strerror</code> returns the human-readable description of the
 given error in <code>err</code>.</p>
@@ -277,8 +287,6 @@ as in diagnostic messages or log entries.</p>
 <tr><td><code>NNG_EWRITEONLY</code><a name="NNG_EWRITEONLY"></a></td><td>25</td><td>Write only resource. A read operation failed because the object only supports writes.</td></tr>
 <tr><td><code>NNG_ECRYPTO</code><a name="NNG_ECRYPTO"></a></td><td>26</td><td>Cryptographic error. Usually indicates an invalid key was used for TLS.</td></tr>
 <tr><td><code>NNG_EPEERAUTH</code><a name="NNG_EPEERAUTH"></a></td><td>27</td><td>Peer could not be authenticated.</td></tr>
-<tr><td><code>NNG_ENOARG</code><a name="NNG_ENOARG"></a></td><td>28</td><td>Option requires argument. A command-line option was supplied without an argument. Only used with <a href="/api/cmd_opts.html#parse-command-line-options"><code>nng_opts_parse</code></a>.</td></tr>
-<tr><td><code>NNG_EAMBIGUOUS</code><a name="NNG_EAMBIGUOUS"></a></td><td>29</td><td>Ambiguous option. The command line option could not be unambiguously resolved. Only used with <a href="/api/cmd_opts.html#parse-command-line-options"><code>nng_opts_parse</code></a>.</td></tr>
 <tr><td><code>NNG_EBADTYPE</code><a name="NNG_EBADTYPE"></a></td><td>30</td><td>Incorrect type. A type-specific function was used for an object of the wrong type.</td></tr>
 <tr><td><code>NNG_ECONNSHUT</code><a name="NNG_ECONNSHUT"></a></td><td>31</td><td>Connection shutdown. The connection was shut down and cannot be used.</td></tr>
 <tr><td><code>NNG_ESTOPPED</code><a name="NNG_ESTOPPED"></a></td><td>1000</td><td>Operation stopped. The operation was stopped with <a href="/api/aio.html#cancellation"><code>nng_aio_stop</code></a> or [<code>nng_aio_close</code>].</td></tr>
@@ -287,6 +295,7 @@ as in diagnostic messages or log entries.</p>
 <tr><td><code>NNG_ETRANERR</code><a name="NNG_ETRANERR"></a></td><td>0x20000000 - 0x2FFFFFFF</td><td>An unidentified transport error occurred.</td></tr>
 </tbody></table>
 </div><!-- Symbol cross reference -->
+<!-- HTTP -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->
@@ -304,7 +313,7 @@ which behave the same way, but <em>NNG</em> does not use a separate
                                 <i class="fa fa-angle-left"></i>
                             </a>
 
-                            <a rel="next prefetch" href="../api/misc.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="../api/stream.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <i class="fa fa-angle-right"></i>
                             </a>
 
@@ -318,7 +327,7 @@ which behave the same way, but <em>NNG</em> does not use a separate
                         <i class="fa fa-angle-left"></i>
                     </a>
 
-                    <a rel="next prefetch" href="../api/misc.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="../api/stream.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <i class="fa fa-angle-right"></i>
                     </a>
             </nav>

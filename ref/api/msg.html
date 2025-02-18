@@ -231,7 +231,7 @@ related information.</p>
   <span class="mdbook-alerts-icon"></span>
   tip
 </p>
-<p>Only applications using <a href="/TODO.html">raw mode</a> need to access the message header.
+<p>Only applications using <a href="/api/sock.html#raw-mode-sockets">raw mode</a> need to access the message header.
 Very few <em>NNG</em> applications do this.</p>
 </div>
 <h2 id="message-structure"><a class="header" href="#message-structure">Message Structure</a></h2>
@@ -383,11 +383,31 @@ properly.</p>
 </code></pre>
 <p>The <a name="a020"></a><code>nng_msg_header_clear</code> simply resets the total message header length to zero.</p>
 <h3 id="append-or-insert-header"><a class="header" href="#append-or-insert-header">Append or Insert Header</a></h3>
+<pre><code class="language-c">int nng_msg_header_append(nng_msg *msg, const void *val, size_t size);
+int nng_msg_header_append_u16(nng_msg *msg, uint16_t val16);
+int nng_msg_header_append_u32(nng_msg *msg, uint32_t val32);
+int nng_msg_header_append_u64(nng_msg *msg, uint64_t val64);
+
+int nng_msg_header_insert(nng_msg *msg, const void *val, size_t size);
+int nng_msg_header_insert_u16(nng_msg *msg, uint16_t val16);
+int nng_msg_header_insert_u32(nng_msg *msg, uint32_t val32);
+int nng_msg_header_insert_u64(nng_msg *msg, uint64_t val64);
+</code></pre>
 <p>Appending data to a message header is done by using the <a name="a021"></a><code>nng_msg_header_append</code> functions,
 and inserting data in the header is done using the <a name="a022"></a><code>nng_msg_header_insert</code> functions.</p>
 <p>These functions act just like the <a href="/api/msg.html#add-to-body"><code>nng_msg_append</code></a> and <a href="/api/msg.html#add-to-body"><code>nng_msg_insert</code></a> functions,
 except that they operate on the message header rather than the message body.</p>
 <h3 id="consume-from-header"><a class="header" href="#consume-from-header">Consume from Header</a></h3>
+<pre><code class="language-c">int nng_msg_header_chop(nng_msg *msg, size_t size);
+int nng_msg_header_chop_u16(nng_msg *msg, uint16_t *val16);
+int nng_msg_header_chop_u32(nng_msg *msg, uint32_t *val32);
+int nng_msg_header_chop_u64(nng_msg *msg, uint64_t *val64);
+
+int nng_msg_header_trim(nng_msg *msg, size_t size);
+int nng_msg_header_trim_u16(nng_msg *msg, uint16_t *val16);
+int nng_msg_header_trim_u32(nng_msg *msg, uint32_t *val32);
+int nng_msg_header_trim_u64(nng_msg *msg, uint64_t *val64);
+</code></pre>
 <p>The <a name="a023"></a><code>nng_msg_header_trim</code> functions remove data from the beginning of the message header,
 and the <a name="a024"></a><code>nng_msg_header_chop</code> functions remove data from the end of the message header.</p>
 <p>These functions act just like the <a href="/api/msg.html#consume-from-body"><code>nng_msg_trim</code></a> and <a href="/api/msg.html#consume-from-body"><code>nng_msg_chop</code></a> functions,
@@ -396,7 +416,7 @@ except that they operate the message header rather than the message body.</p>
 <pre><code class="language-c">nng_pipe nng_msg_get_pipe(nng_msg *msg);
 void nng_msg_get_pipe(nng_msg *msg, nng_pipe p);
 </code></pre>
-<p>The <a name="a025"></a><code>nng_msg_set_pipe</code> function sets the <a href="/TODO.html">pipe</a> associated with <em>msg</em> to <em>p</em>.
+<p>The <a name="a025"></a><code>nng_msg_set_pipe</code> function sets the <a href="/api/pipe.html">pipe</a> associated with <em>msg</em> to <em>p</em>.
 This is most often useful when used with protocols that support directing
 a message to a specific peer.
 For example the <a href="/proto/pair.html"><em>PAIR</em></a> version 1 protocol can do
@@ -412,25 +432,26 @@ either directly by the application, or when the message was received by the prot
 </div>
 <h2 id="examples"><a class="header" href="#examples">Examples</a></h2>
 <h3 id="example-1-preparing-a-message-for-use"><a class="header" href="#example-1-preparing-a-message-for-use">Example 1: Preparing a message for use</a></h3>
-<pre><code class="language-c">    #include &lt;nng/nng.h&gt;
+<pre><code class="language-c">#include &lt;nng/nng.h&gt;
 
-    nng_msg *m;
-    if (nng_msg_alloc(&amp;m, strlen("content") + 1) != 0) {
-       // handle error
-    }
-    strcpy(nng_msg_body(m), "content");
+nng_msg *m;
+if (nng_msg_alloc(&amp;m, strlen("content") + 1) != 0) {
+  // handle error
+}
+strcpy(nng_msg_body(m), "content");
 </code></pre>
 <h3 id="example-2-preallocating-message-content"><a class="header" href="#example-2-preallocating-message-content">Example 2: Preallocating message content</a></h3>
-<pre><code class="language-c">    if (nng_msg_alloc(&amp;m, 1024) != 0) {
-        // handle error
-    }
-    while ((val64 = next_datum()) != 0) P
-        if (nng_msg_append_u64(m, val64) != 0) {
-            // handle error
-        }
-    }
+<pre><code class="language-c">if (nng_msg_alloc(&amp;m, 1024) != 0) {
+  // handle error
+}
+while ((val64 = next_datum()) != 0) P
+  if (nng_msg_append_u64(m, val64) != 0) {
+      // handle error
+  }
+}
 </code></pre>
 <!-- Symbol cross reference -->
+<!-- HTTP -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->

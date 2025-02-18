@@ -255,7 +255,7 @@ operations that are already in progress as well setting a maximum
 <p>It is also possible to initiate an asynchronous operation, and <a href="/api/aio.html#wait-for-completion">wait</a> for it to
 complete, creating a synchronous flow from an asynchronous one.</p>
 <h2 id="create-handle"><a class="header" href="#create-handle">Create Handle</a></h2>
-<pre><code class="language-c">int nng_aio_alloc(nng_aio **aiop, void (*callb)(void *), void *arg);
+<pre><code class="language-c">nng_err nng_aio_alloc(nng_aio **aiop, void (*callb)(void *), void *arg);
 </code></pre>
 <p>The <a name="a004"></a><code>nng_aio_alloc</code> function creates an <a href="/api/aio.html#asynchronous-io-handle"><code>nng_aio</code></a> object, with the
 <a name="a005"></a>callback <em>callb</em> taking the argument <em>arg</em>, and returns it in <em>aiop</em>.</p>
@@ -295,7 +295,7 @@ is safe to call from <em>aio</em>’s own callback.</p>
 Use <code>nng_aio_reap</code> instead if an object must be destroyed from a callback.</p>
 </div>
 <h2 id="cancellation"><a class="header" href="#cancellation">Cancellation</a></h2>
-<pre><code class="language-c">void nng_aio_abort(nng_aio *aio, int err);
+<pre><code class="language-c">void nng_aio_abort(nng_aio *aio, nng_err err);
 void nng_aio_cancel(nng_aio *aio);
 void nng_aio_stop(nng_aio *aio);
 </code></pre>
@@ -310,7 +310,7 @@ and returns immediately without waiting. If cancellation was successful,
 then <a href="/api/aio.html#result-of-operation"><code>nng_aio_result</code></a> will return <em>err</em>.</p>
 <p>The <a name="a009"></a><code>nng_aio_cancel</code> function acts like <code>nng_aio_abort</code>, but uses the error code
 <a href="/api/errors.html#NNG_ECANCELED"><code>NNG_ECANCELED</code></a><a name="a010"></a>.</p>
-<p>The <a name="a011"></a><code>nng_aio_stop</code> function aborts the <em>aio</em> operation with [<code>NNG_ESTOPPED</code>],
+<p>The <a name="a011"></a><code>nng_aio_stop</code> function aborts the <em>aio</em> operation with <a href="/api/errors.html#NNG_ESTOPPED"><code>NNG_ESTOPPED</code></a>,
 and then waits the operation and any associated callback to complete.
 This function also marks <em>aio</em> itself permanently stopped, so that any
 new operations scheduled by I/O providers using <a href="/TODO.html"><code>nng_aio_start</code></a>
@@ -373,7 +373,7 @@ This is the same test used internally by <a href="/api/aio.html#wait-for-complet
 Because the <em>aio</em> can be reused use of this function can be racy.</p>
 </div>
 <h2 id="result-of-operation"><a class="header" href="#result-of-operation">Result of Operation</a></h2>
-<pre><code class="language-c">int nng_aio_result(nng_aio *aio);
+<pre><code class="language-c">nng_err nng_aio_result(nng_aio *aio);
 size_t nng_aio_count(nng_aio *aio);
 </code></pre>
 <p>The <a name="a016"></a><code>nng_aio_result</code> function returns the result of the operation associated
@@ -473,11 +473,34 @@ return <code>NULL</code>.</p>
 <p>It is an error to call this function while the <em>aio</em> is currently
 in use by an active asynchronous operation.</p>
 </div>
+<h2 id="scatter-gather-vectors"><a class="header" href="#scatter-gather-vectors">Scatter Gather Vectors</a></h2>
+<pre><code class="language-c">typedef struct nng_iov {
+	void  *iov_buf;
+	size_t iov_len;
+} nng_iov;
+
+void nng_aio_set_iov(nng_aio *aio, unsigned nio, const nng_iov *iov);
+</code></pre>
+<p><a name="a022"></a>
+Some asynchronous operations, such as those dealing with <a href="/api/stream.html">streams</a>, use <a name="a023"></a>scatter or <a name="a024"></a>gather
+vectors, where data to be transferred is either gathered from multiple separate regions of memory, or
+scattered into separate regions of memory. For example a message may have a header located at one location
+in memory, and a payload located in another.</p>
+<p>The <a name="a025"></a><code>nng_aio_set_iov</code> function configures the <em>aio</em> to use <em>nio</em> separate segments, described by
+the elements in <em>iov</em>. For each of these, the segment of size <em>iov_len</em> located at <em>iov_buf</em> will be used.</p>
+<p>The elements of <em>iov</em> will be copied into <em>aio</em>, so the vector may be located
+on the stack or another temporary location. The locations referenced by it, <em>must</em> remain valid for
+the duration of the operation, of course.</p>
+<p>Note that many of these operations are not guaranteed to perform a full transfer of data, so even a
+successful operation should check the amount of data actually transferred using <a href="/api/aio.html#result-of-operation"><code>nng_aio_count</code></a>,
+and if necessary resubmit the operation with a suitably updated vector of <code>nng_iov</code> using this function.</p>
 <h2 id="see-also"><a class="header" href="#see-also">See Also</a></h2>
 <p><a href="/api/synch.html">Synchronization</a>,
 <a href="/api/thread.html">Threads</a>,
+<a href="/api/stream.html">Streams</a>,
 <a href="/api/time.html">Time</a></p>
 <!-- Symbol cross reference -->
+<!-- HTTP -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->

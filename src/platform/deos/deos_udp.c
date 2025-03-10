@@ -18,10 +18,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <dw_socket.h>
 
 // UDP support.
 
@@ -120,9 +121,12 @@ nni_udp_dorecv(nni_plat_udp *udp)
 			buf = bouncebuf;
 			len = sizeof(bouncebuf);
 		}
-		salen = sizeof(ss);
+		// dwsocket recvfrom clobbers the value of salen with garbage
+		// apparently. Keep a copy of it .
+		salen   = sizeof(ss);
+		sadummy = salen;
 		if ((cnt = recvfrom(udp->udp_fd, buf, len, 0, (void *) &ss,
-		         &salen)) < 0) {
+		         &sadummy)) < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
 				return;
 			}
@@ -330,7 +334,7 @@ udp_thread(void *arg)
 		// likelihood, this will be just the remainder of the tick.
 		ts.tv_sec  = 0;
 		ts.tv_nsec = 10000; // 10 microsends
-		nanolseep(&ts, NULL);
+		nanosleep(&ts, NULL);
 	}
 }
 
@@ -339,7 +343,7 @@ nni_udp_init(void *arg)
 {
 	pthread_t thr;
 	NNI_LIST_INIT(&udp_list, nni_plat_udp, udp_node);
-	pthread_create(&thp, NULL, udp_thread, NULL);
+	pthread_create(&thr, NULL, udp_thread, NULL);
 }
 
 #endif // NNG_PLATFORM_POSIX

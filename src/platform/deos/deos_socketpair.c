@@ -9,6 +9,8 @@
 
 #ifdef NNG_PLATFORM_DEOS
 
+#include "core/defs.h"
+
 nng_err
 nni_socket_pair(int fds[2])
 {

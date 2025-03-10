@@ -20,6 +20,8 @@
 #include "core/nng_impl.h"
 #include "deos_impl.h"
 
+#include <string.h>
+
 void
 nni_resolv(nni_resolv_item *item, nni_aio *aio)
 {
@@ -49,6 +51,7 @@ nni_resolv(nni_resolv_item *item, nni_aio *aio)
 	// result in a double conversion, but it ensures that NNG applications
 	// behave as expected.
 	item->ri_sa->s_in.sa_addr = nni_htonl(inet_addr(item->ri_host));
+	item->ri_sa->s_in.sa_port = nni_htons(item->ri_port);
 	if (item->ri_passive) {
 		// Bad parse may return INADDR_NONE, which we
 		// absolutely cannot bind to.  Just fail.

@@ -25,7 +25,6 @@ nni_plat_file_put(const char *name, const void *data, size_t len)
 {
 	NNI_ARG_UNUSED(name);
 	NNI_ARG_UNUSED(data);
-	NNI_ARG_UNUSED(size);
 	NNI_ARG_UNUSED(len);
 	return (NNG_ENOTSUP);
 }

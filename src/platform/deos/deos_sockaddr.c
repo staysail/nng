@@ -14,8 +14,9 @@
 #include <dw_socket.h>
 
 // htonl and htons variants supplied as we don't know what the system offers.
-// Note also, that DEOS uses *NATIVE* byte order in sockaddrs, unlike the
-// entire rest of the BSD Socket using universe.
+// Note also, that DWSOCKETS uses *NATIVE* byte order in sockaddr IP addresses,
+// unlike the entire rest of the BSD Socket using universe.  It does however
+// use the *NETWORK* byte order for the port, which is highly inconsistent.
 
 uint16_t
 nni_htons(uint16_t in)
@@ -39,6 +40,7 @@ nni_deos_nn2sockaddr(void *sa, const nni_sockaddr *na)
 {
 	struct sockaddr_in *sin;
 	size_t              sz;
+	nng_sockaddr_in    *nsin;
 
 	if ((sa == NULL) || (na == NULL)) {
 		return (0);
@@ -48,9 +50,10 @@ nni_deos_nn2sockaddr(void *sa, const nni_sockaddr *na)
 		sin  = (void *) sa;
 		nsin = &na->s_in;
 		memset(sin, 0, sizeof(*sin));
-		sin->sin_family      = AF_INET;
-		sin->sin_port        = nsin->sa_port;
-		sin->sin_addr.s_addr = nni_ntohl(nsin->sa_addr);
+		sin->sin_family = AF_INET;
+		sin->sin_port   = nsin->sa_port;
+		sin->sin_addr.s_addr =
+		    nni_htonl(nsin->sa_addr); // technically ntohl
 		return (sizeof(*sin));
 	}
 	return (0);

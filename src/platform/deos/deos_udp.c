@@ -19,7 +19,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 #include <dw_socket.h>
@@ -114,6 +113,7 @@ nni_udp_dorecv(nni_plat_udp *udp)
 		uint8_t  *buf;
 		size_t    len;
 		socklen_t salen;
+		socklen_t sadummy;
 		if (niov == 1) {
 			buf = aiov[0].iov_buf;
 			len = aiov[0].iov_len;

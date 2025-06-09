@@ -58,6 +58,7 @@ struct nni_plat_udp {
 	nni_list      udp_recvq;
 	nni_list      udp_sendq;
 	nni_mtx       udp_mtx;
+	bool          udp_stopped;
 };
 
 static void
@@ -308,7 +309,7 @@ nni_posix_udp_cb(void *arg, unsigned events)
 }
 
 int
-nni_plat_udp_open(nni_plat_udp **upp, nni_sockaddr *bindaddr)
+nni_plat_udp_open(nni_plat_udp **upp, const nni_sockaddr *bindaddr)
 {
 	nni_plat_udp           *udp;
 	int                     salen;
@@ -361,15 +362,20 @@ nni_plat_udp_open(nni_plat_udp **upp, nni_sockaddr *bindaddr)
 }
 
 void
-nni_plat_udp_close(nni_plat_udp *udp)
+nni_plat_udp_stop(nni_plat_udp *udp)
 {
-	nni_posix_pfd_stop(&udp->udp_pfd);
-
 	nni_mtx_lock(&udp->udp_mtx);
+	udp->udp_stopped = true;
 	nni_posix_udp_doclose(udp);
 	nni_mtx_unlock(&udp->udp_mtx);
 
 	nni_posix_pfd_stop(&udp->udp_pfd);
+}
+
+void
+nni_plat_udp_close(nni_plat_udp *udp)
+{
+	nni_plat_udp_stop(udp);
 	nni_posix_pfd_fini(&udp->udp_pfd);
 	(void) close(udp->udp_fd);
 	nni_mtx_fini(&udp->udp_mtx);
@@ -377,7 +383,7 @@ nni_plat_udp_close(nni_plat_udp *udp)
 }
 
 void
-nni_plat_udp_cancel(nni_aio *aio, void *arg, int rv)
+nni_plat_udp_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_plat_udp *udp = arg;
 
@@ -399,6 +405,11 @@ nni_plat_udp_recv(nni_plat_udp *udp, nni_aio *aio)
 		nni_mtx_unlock(&udp->udp_mtx);
 		return;
 	}
+	if (udp->udp_stopped) {
+		nni_mtx_unlock(&udp->udp_mtx);
+		nni_aio_finish_error(aio, NNG_ECLOSED);
+		return;
+	}
 	nni_list_append(&udp->udp_recvq, aio);
 	if (nni_list_first(&udp->udp_recvq) == aio) {
 		if ((rv = nni_posix_pfd_arm(&udp->udp_pfd, NNI_POLL_IN)) !=
@@ -418,6 +429,11 @@ nni_plat_udp_send(nni_plat_udp *udp, nni_aio *aio)
 	nni_mtx_lock(&udp->udp_mtx);
 	if (!nni_aio_start(aio, nni_plat_udp_cancel, udp)) {
 		nni_mtx_unlock(&udp->udp_mtx);
+		return;
+	}
+	if (udp->udp_stopped) {
+		nni_mtx_unlock(&udp->udp_mtx);
+		nni_aio_finish_error(aio, NNG_ECLOSED);
 		return;
 	}
 	nni_list_append(&udp->udp_sendq, aio);

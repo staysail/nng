@@ -35,6 +35,7 @@ tls_server_config_ecdsa(void)
 	return (c);
 }
 
+#ifdef NNG_SUPP_TLS_PSK
 static nng_tls_config *
 tls_config_psk(nng_tls_mode mode, const char *name, uint8_t *key, size_t len)
 {
@@ -43,6 +44,7 @@ tls_config_psk(nng_tls_mode mode, const char *name, uint8_t *key, size_t len)
 	NUTS_PASS(nng_tls_config_psk(c, name, key, len));
 	return (c);
 }
+#endif
 
 static nng_tls_config *
 tls_client_config(void)
@@ -52,6 +54,7 @@ tls_client_config(void)
 	NUTS_PASS(nng_tls_config_own_cert(
 	    c, nuts_client_crt, nuts_client_key, NULL));
 	NUTS_PASS(nng_tls_config_ca_chain(c, nuts_server_crt, NULL));
+	NUTS_PASS(nng_tls_config_server_name(c, "localhost"));
 	return (c);
 }
 
@@ -63,6 +66,7 @@ tls_client_config_ecdsa(void)
 	NUTS_PASS(nng_tls_config_own_cert(
 	    c, nuts_ecdsa_client_crt, nuts_ecdsa_client_key, NULL));
 	NUTS_PASS(nng_tls_config_ca_chain(c, nuts_ecdsa_server_crt, NULL));
+	NUTS_PASS(nng_tls_config_server_name(c, "localhost"));
 	return (c);
 }
 
@@ -389,7 +393,7 @@ NUTS_TESTS = {
 	{ "tls keep alive option", test_tls_keep_alive_option },
 	{ "tls recv max", test_tls_recv_max },
 	{ "tls pre-shared key", test_tls_psk },
-	{ "tsl bad cert mutual", test_tls_bad_cert_mutual },
-	{ "tsl cert mutual", test_tls_cert_mutual },
+	{ "tls bad cert mutual", test_tls_bad_cert_mutual },
+	{ "tls cert mutual", test_tls_cert_mutual },
 	{ NULL, NULL },
 };

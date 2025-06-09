@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 //
 // This software is supplied under the terms of the MIT License, a
 // copy of which should be located in the distribution where this
@@ -20,7 +20,7 @@
 // accept is performed, then another slot is available.
 #define NNG_SFD_LISTEN_QUEUE 16
 
-int
+nng_err
 nni_sfd_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 {
 	NNI_ARG_UNUSED(dp);
@@ -69,19 +69,19 @@ sfd_listener_stop(void *arg)
 	sfd_listener_close(arg);
 }
 
-static int
+static nng_err
 sfd_listener_listen(void *arg)
 {
 	NNI_ARG_UNUSED(arg);
 	// nothing really for us to do
-	return (0);
+	return (NNG_OK);
 }
 
 static void
 sfd_start_conn(sfd_listener *l, nni_aio *aio)
 {
 	int           fd;
-	int           rv;
+	nng_err       rv;
 	nni_sfd_conn *c;
 	NNI_ASSERT(l->listen_cnt > 0);
 	fd = l->listen_q[0];
@@ -99,7 +99,7 @@ sfd_start_conn(sfd_listener *l, nni_aio *aio)
 }
 
 static void
-sfd_cancel_accept(nni_aio *aio, void *arg, int rv)
+sfd_cancel_accept(nni_aio *aio, void *arg, nng_err rv)
 {
 	sfd_listener *l = arg;
 
@@ -135,15 +135,15 @@ sfd_listener_accept(void *arg, nng_aio *aio)
 	nni_mtx_unlock(&l->mtx);
 }
 
-static int
+static nng_err
 sfd_listener_set_fd(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	sfd_listener *l = arg;
 	nni_aio      *aio;
 	int           fd;
-	int           rv;
+	nng_err       rv;
 
-	if ((rv = nni_copyin_int(&fd, buf, sz, 0, NNI_MAXINT, t)) != 0) {
+	if ((rv = nni_copyin_int(&fd, buf, sz, 0, NNI_MAXINT, t)) != NNG_OK) {
 		return (rv);
 	}
 
@@ -167,10 +167,10 @@ sfd_listener_set_fd(void *arg, const void *buf, size_t sz, nni_type t)
 	}
 
 	nni_mtx_unlock(&l->mtx);
-	return (0);
+	return (NNG_OK);
 }
 
-static int
+static nng_err
 sfd_listener_get_addr(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	NNI_ARG_UNUSED(arg);
@@ -193,7 +193,7 @@ static const nni_option sfd_listener_options[] = {
 	},
 };
 
-static int
+static nng_err
 sfd_listener_get(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
@@ -201,7 +201,7 @@ sfd_listener_get(
 	return (nni_getopt(sfd_listener_options, name, l, buf, szp, t));
 }
 
-static int
+static nng_err
 sfd_listener_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
@@ -209,7 +209,7 @@ sfd_listener_set(
 	return (nni_setopt(sfd_listener_options, name, l, buf, sz, t));
 }
 
-int
+nng_err
 nni_sfd_listener_alloc(nng_stream_listener **lp, const nng_url *url)
 {
 	sfd_listener *l;
@@ -233,5 +233,5 @@ nni_sfd_listener_alloc(nng_stream_listener **lp, const nng_url *url)
 	l->ops.sl_set    = sfd_listener_set;
 
 	*lp = (void *) l;
-	return (0);
+	return (NNG_OK);
 }

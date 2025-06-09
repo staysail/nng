@@ -82,7 +82,7 @@ nni_posix_ipc_dialer_rele(ipc_dialer *d)
 }
 
 static void
-ipc_dialer_cancel(nni_aio *aio, void *arg, int rv)
+ipc_dialer_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ipc_dialer *d = arg;
 	nni_ipc_conn   *c;
@@ -249,7 +249,7 @@ error:
 	nni_aio_finish_error(aio, rv);
 }
 
-static int
+static nng_err
 ipc_dialer_get_remaddr(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	ipc_dialer *d = arg;
@@ -258,7 +258,7 @@ ipc_dialer_get_remaddr(void *arg, void *buf, size_t *szp, nni_type t)
 }
 
 #ifdef NNG_TEST_LIB
-static int
+static nng_err
 ipc_dialer_set_test_no_connect(
     void *arg, const void *buf, size_t sz, nni_type t)
 {
@@ -289,14 +289,14 @@ static const nni_option ipc_dialer_options[] = {
 	},
 };
 
-static int
+static nng_err
 ipc_dialer_get(void *arg, const char *nm, void *buf, size_t *szp, nni_type t)
 {
 	ipc_dialer *d = arg;
 	return (nni_getopt(ipc_dialer_options, nm, d, buf, szp, t));
 }
 
-static int
+static nng_err
 ipc_dialer_set(
     void *arg, const char *nm, const void *buf, size_t sz, nni_type t)
 {
@@ -304,7 +304,7 @@ ipc_dialer_set(
 	return (nni_setopt(ipc_dialer_options, nm, d, buf, sz, t));
 }
 
-int
+nng_err
 nni_ipc_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 {
 	ipc_dialer *d;

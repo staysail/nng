@@ -74,7 +74,7 @@ static int                nni_aio_expire_q_cnt;
 
 static nni_reap_list aio_reap_list = {
 	.rl_offset = offsetof(nni_aio, a_reap_node),
-	.rl_func   = (nni_cb) nni_aio_free,
+	.rl_func   = nni_aio_free_cb,
 };
 
 static void nni_aio_expire_add(nni_aio *);
@@ -144,6 +144,12 @@ nni_aio_free(nni_aio *aio)
 		nni_aio_fini(aio);
 		NNI_FREE_STRUCT(aio);
 	}
+}
+
+void
+nni_aio_free_cb(void *aio)
+{
+	nni_aio_free((nni_aio *) aio);
 }
 
 void
@@ -493,7 +499,7 @@ nni_aio_finish_sync(nni_aio *aio, nng_err result, size_t count)
 void
 nni_aio_finish_error(nni_aio *aio, nng_err result)
 {
-	nni_aio_finish_impl(aio, result, NNG_OK, NULL, false);
+	nni_aio_finish_impl(aio, result, 0, NULL, false);
 }
 
 void
@@ -756,7 +762,7 @@ nni_aio_iov_advance(nni_aio *aio, size_t n)
 }
 
 static void
-nni_sleep_cancel(nng_aio *aio, void *arg, int rv)
+nni_sleep_cancel(nng_aio *aio, void *arg, nng_err rv)
 {
 	NNI_ARG_UNUSED(arg);
 	nni_aio_expire_q *eq = aio->a_expire_q;

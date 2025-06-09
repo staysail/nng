@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2018 Devolutions <info@devolutions.net>
 //
@@ -96,7 +96,7 @@ tcp_recv_cb(nni_win_io *io, int rv, size_t num)
 }
 
 static void
-tcp_recv_cancel(nni_aio *aio, void *arg, int rv)
+tcp_recv_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_tcp_conn *c = arg;
 	nni_mtx_lock(&c->mtx);
@@ -262,7 +262,7 @@ tcp_close(void *arg)
 	nni_mtx_unlock(&c->mtx);
 }
 
-static int
+static nng_err
 tcp_get_peername(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *c = arg;
@@ -274,7 +274,7 @@ tcp_get_peername(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_sockaddr(&sa, buf, szp, t));
 }
 
-static int
+static nng_err
 tcp_get_sockname(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *c = arg;
@@ -286,7 +286,7 @@ tcp_get_sockname(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_sockaddr(&sa, buf, szp, t));
 }
 
-static int
+static nng_err
 tcp_get_nodelay(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *c   = arg;
@@ -300,7 +300,7 @@ tcp_get_nodelay(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_bool(b, buf, szp, t));
 }
 
-static int
+static nng_err
 tcp_get_keepalive(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_tcp_conn *c   = arg;

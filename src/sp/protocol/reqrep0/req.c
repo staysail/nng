@@ -359,7 +359,10 @@ req0_recv_cb(void *arg)
 	nni_id_remove(&s->requests, id);
 	ctx->request_id = 0;
 	if (ctx->req_msg != NULL) {
-		nni_msg_free(ctx->req_msg);
+		// Only free msg if we originally cloned it (for retries)
+		if (ctx->retry > 0) {
+			nni_msg_free(ctx->req_msg);
+		}
 		ctx->req_msg = NULL;
 	}
 
@@ -462,14 +465,14 @@ req0_ctx_fini(void *arg)
 	nni_mtx_unlock(&s->mtx);
 }
 
-static int
+static nng_err
 req0_ctx_set_resend_time(void *arg, const void *buf, size_t sz, nni_opt_type t)
 {
 	req0_ctx *ctx = arg;
 	return (nni_copyin_ms(&ctx->retry, buf, sz, t));
 }
 
-static int
+static nng_err
 req0_ctx_get_resend_time(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	req0_ctx *ctx = arg;
@@ -533,7 +536,11 @@ req0_run_send_queue(req0_sock *s, nni_aio_completions *sent_list)
 		// At this point, we will never give this message back to
 		// the user, so we don't have to worry about making it
 		// unique.  We can freely clone it.
-		nni_msg_clone(ctx->req_msg);
+		// But only do so if we need to hang onto it (for potential
+		// retries)
+		if (ctx->retry > 0) {
+			nni_msg_clone(ctx->req_msg);
+		}
 		nni_aio_set_msg(&p->aio_send, ctx->req_msg);
 		nni_pipe_send(p->pipe, &p->aio_send);
 	}
@@ -553,7 +560,10 @@ req0_ctx_reset(req0_ctx *ctx)
 		ctx->request_id = 0;
 	}
 	if (ctx->req_msg != NULL) {
-		nni_msg_free(ctx->req_msg);
+		// Only free msg if we originally cloned it (for retries)
+		if (ctx->retry > 0) {
+			nni_msg_free(ctx->req_msg);
+		}
 		ctx->req_msg = NULL;
 	}
 	if (ctx->rep_msg != NULL) {
@@ -564,7 +574,7 @@ req0_ctx_reset(req0_ctx *ctx)
 }
 
 static void
-req0_ctx_cancel_recv(nni_aio *aio, void *arg, int rv)
+req0_ctx_cancel_recv(nni_aio *aio, void *arg, nng_err rv)
 {
 	req0_ctx  *ctx = arg;
 	req0_sock *s   = ctx->sock;
@@ -652,7 +662,7 @@ req0_ctx_recv(void *arg, nni_aio *aio)
 }
 
 static void
-req0_ctx_cancel_send(nni_aio *aio, void *arg, int rv)
+req0_ctx_cancel_send(nni_aio *aio, void *arg, nng_err rv)
 {
 	req0_ctx  *ctx = arg;
 	req0_sock *s   = ctx->sock;
@@ -767,52 +777,53 @@ req0_sock_recv(void *arg, nni_aio *aio)
 	req0_ctx_recv(&s->master, aio);
 }
 
-static int
+static nng_err
 req0_sock_set_max_ttl(void *arg, const void *buf, size_t sz, nni_opt_type t)
 {
 	req0_sock *s = arg;
 	int        ttl;
-	int        rv;
-	if ((rv = nni_copyin_int(&ttl, buf, sz, 1, NNI_MAX_MAX_TTL, t)) == 0) {
+	nng_err    rv;
+	if ((rv = nni_copyin_int(&ttl, buf, sz, 1, NNI_MAX_MAX_TTL, t)) ==
+	    NNG_OK) {
 		nni_atomic_set(&s->ttl, ttl);
 	}
 	return (rv);
 }
 
-static int
+static nng_err
 req0_sock_get_max_ttl(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	req0_sock *s = arg;
 	return (nni_copyout_int(nni_atomic_get(&s->ttl), buf, szp, t));
 }
 
-static int
+static nng_err
 req0_sock_set_resend_time(
     void *arg, const void *buf, size_t sz, nni_opt_type t)
 {
 	req0_sock *s = arg;
-	int        rv;
+	nng_err    rv;
 	rv       = req0_ctx_set_resend_time(&s->master, buf, sz, t);
 	s->retry = s->master.retry;
 	return (rv);
 }
 
-static int
+static nng_err
 req0_sock_get_resend_time(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	req0_sock *s = arg;
 	return (req0_ctx_get_resend_time(&s->master, buf, szp, t));
 }
 
-static int
+static nng_err
 req0_sock_set_resend_tick(
     void *arg, const void *buf, size_t sz, nni_opt_type t)
 {
 	req0_sock   *s = arg;
 	nng_duration tick;
-	int          rv;
+	nng_err      rv;
 
-	if ((rv = nni_copyin_ms(&tick, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_ms(&tick, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&s->mtx);
 		s->retry_tick = tick;
 		nni_mtx_unlock(&s->mtx);
@@ -820,7 +831,7 @@ req0_sock_set_resend_tick(
 	return (rv);
 }
 
-static int
+static nng_err
 req0_sock_get_resend_tick(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	req0_sock   *s = arg;
@@ -832,7 +843,7 @@ req0_sock_get_resend_tick(void *arg, void *buf, size_t *szp, nni_opt_type t)
 	return (nni_copyout_ms(tick, buf, szp, t));
 }
 
-static int
+static nng_err
 req0_sock_get_send_fd(void *arg, int *fdp)
 {
 	req0_sock *s = arg;
@@ -840,7 +851,7 @@ req0_sock_get_send_fd(void *arg, int *fdp)
 	return (nni_pollable_getfd(&s->writable, fdp));
 }
 
-static int
+static nng_err
 req0_sock_get_recv_fd(void *arg, int *fdp)
 {
 	req0_sock *s = arg;

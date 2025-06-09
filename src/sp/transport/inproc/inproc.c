@@ -176,7 +176,7 @@ inproc_queue_run(inproc_queue *queue)
 }
 
 static void
-inproc_queue_cancel(nni_aio *aio, void *arg, int rv)
+inproc_queue_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	inproc_queue *queue = arg;
 
@@ -247,7 +247,7 @@ inproc_pipe_peer(void *arg)
 	return (pipe->peer);
 }
 
-static int
+static nng_err
 inproc_pipe_get_addr(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	inproc_pipe *p = arg;
@@ -270,24 +270,24 @@ inproc_ep_init(inproc_ep *ep, nni_sock *sock, const nng_url *url)
 	ep->addr = url->u_path; // we match on the URL path.
 }
 
-static int
+static nng_err
 inproc_dialer_init(void *arg, nng_url *url, nni_dialer *ndialer)
 {
 	inproc_ep *ep = arg;
 
 	ep->dialer = ndialer;
 	inproc_ep_init(ep, nni_dialer_sock(ndialer), url);
-	return (0);
+	return (NNG_OK);
 }
 
-static int
+static nng_err
 inproc_listener_init(void *arg, nng_url *url, nni_listener *nlistener)
 {
 	inproc_ep *ep = arg;
 
 	ep->listener = nlistener;
 	inproc_ep_init(ep, nni_listener_sock(nlistener), url);
-	return (0);
+	return (NNG_OK);
 }
 
 static void
@@ -433,7 +433,7 @@ inproc_accept_clients(inproc_ep *srv)
 }
 
 static void
-inproc_ep_cancel(nni_aio *aio, void *arg, int rv)
+inproc_ep_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	inproc_ep *ep = arg;
 
@@ -483,7 +483,7 @@ inproc_ep_connect(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&nni_inproc.mx);
 }
 
-static int
+static nng_err
 inproc_ep_bind(void *arg, nng_url *url)
 {
 	inproc_ep *ep = arg;
@@ -500,7 +500,7 @@ inproc_ep_bind(void *arg, nng_url *url)
 	}
 	nni_list_append(list, ep);
 	nni_mtx_unlock(&nni_inproc.mx);
-	return (0);
+	return (NNG_OK);
 }
 
 static void
@@ -526,24 +526,24 @@ inproc_ep_accept(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&nni_inproc.mx);
 }
 
-static int
+static nng_err
 inproc_ep_get_recvmaxsz(void *arg, void *v, size_t *szp, nni_opt_type t)
 {
 	inproc_ep *ep = arg;
-	int        rv;
+	nng_err    rv;
 	nni_mtx_lock(&ep->mtx);
 	rv = nni_copyout_size(ep->rcvmax, v, szp, t);
 	nni_mtx_unlock(&ep->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 inproc_ep_set_recvmaxsz(void *arg, const void *v, size_t sz, nni_opt_type t)
 {
 	inproc_ep *ep = arg;
 	size_t     val;
-	int        rv;
-	if ((rv = nni_copyin_size(&val, v, sz, 0, NNI_MAXSZ, t)) == 0) {
+	nng_err    rv;
+	if ((rv = nni_copyin_size(&val, v, sz, 0, NNI_MAXSZ, t)) == NNG_OK) {
 		nni_mtx_lock(&ep->mtx);
 		ep->rcvmax = val;
 		nni_mtx_unlock(&ep->mtx);
@@ -551,7 +551,7 @@ inproc_ep_set_recvmaxsz(void *arg, const void *v, size_t sz, nni_opt_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 inproc_ep_get_addr(void *arg, void *v, size_t *szp, nni_opt_type t)
 {
 	inproc_ep   *ep = arg;
@@ -584,8 +584,14 @@ inproc_pipe_getopt(
 	return (nni_getopt(inproc_pipe_options, name, arg, v, szp, t));
 }
 
+static size_t
+inproc_pipe_size(void)
+{
+	return (sizeof(inproc_pipe));
+}
+
 static nni_sp_pipe_ops inproc_pipe_ops = {
-	.p_size   = sizeof(inproc_pipe),
+	.p_size   = inproc_pipe_size,
 	.p_init   = inproc_pipe_init,
 	.p_fini   = inproc_pipe_fini,
 	.p_send   = inproc_pipe_send,
@@ -616,13 +622,13 @@ static const nni_option inproc_ep_options[] = {
 	},
 };
 
-static int
+static nng_err
 inproc_ep_getopt(void *arg, const char *name, void *v, size_t *szp, nni_type t)
 {
 	return (nni_getopt(inproc_ep_options, name, arg, v, szp, t));
 }
 
-static int
+static nng_err
 inproc_ep_setopt(
     void *arg, const char *name, const void *v, size_t sz, nni_type t)
 {

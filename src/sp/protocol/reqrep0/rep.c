@@ -111,7 +111,7 @@ rep0_ctx_init(void *carg, void *sarg)
 }
 
 static void
-rep0_ctx_cancel_send(nni_aio *aio, void *arg, int rv)
+rep0_ctx_cancel_send(nni_aio *aio, void *arg, nng_err rv)
 {
 	rep0_ctx  *ctx = arg;
 	rep0_sock *s   = ctx->sock;
@@ -400,7 +400,7 @@ rep0_pipe_send_cb(void *arg)
 }
 
 static void
-rep0_cancel_recv(nni_aio *aio, void *arg, int rv)
+rep0_cancel_recv(nni_aio *aio, void *arg, nng_err rv)
 {
 	rep0_ctx  *ctx = arg;
 	rep0_sock *s   = ctx->sock;
@@ -567,20 +567,21 @@ drop:
 	nni_pipe_recv(p->pipe, &p->aio_recv);
 }
 
-static int
+static nng_err
 rep0_sock_set_max_ttl(void *arg, const void *buf, size_t sz, nni_opt_type t)
 {
 	rep0_sock *s = arg;
 	int        ttl;
-	int        rv;
+	nng_err    rv;
 
-	if ((rv = nni_copyin_int(&ttl, buf, sz, 1, NNI_MAX_MAX_TTL, t)) == 0) {
+	if ((rv = nni_copyin_int(&ttl, buf, sz, 1, NNI_MAX_MAX_TTL, t)) ==
+	    NNG_OK) {
 		nni_atomic_set(&s->ttl, ttl);
 	}
 	return (rv);
 }
 
-static int
+static nng_err
 rep0_sock_get_max_ttl(void *arg, void *buf, size_t *szp, nni_opt_type t)
 {
 	rep0_sock *s = arg;
@@ -588,7 +589,7 @@ rep0_sock_get_max_ttl(void *arg, void *buf, size_t *szp, nni_opt_type t)
 	return (nni_copyout_int(nni_atomic_get(&s->ttl), buf, szp, t));
 }
 
-static int
+static nng_err
 rep0_sock_get_sendfd(void *arg, int *fdp)
 {
 	rep0_sock *s = arg;
@@ -596,7 +597,7 @@ rep0_sock_get_sendfd(void *arg, int *fdp)
 	return (nni_pollable_getfd(&s->writable, fdp));
 }
 
-static int
+static nng_err
 rep0_sock_get_recvfd(void *arg, int *fdp)
 {
 	rep0_sock *s = arg;

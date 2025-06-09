@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -123,7 +123,7 @@ ipc_dial_thr(void *arg)
 }
 
 static void
-ipc_dial_cancel(nni_aio *aio, void *arg, int rv)
+ipc_dial_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ipc_dialer    *d = arg;
 	ipc_dial_work *w = &ipc_connector;
@@ -205,7 +205,7 @@ ipc_dialer_free(void *arg)
 	NNI_FREE_STRUCT(d);
 }
 
-static int
+static nng_err
 ipc_dialer_get_remaddr(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	ipc_dialer *d = arg;
@@ -223,7 +223,7 @@ static const nni_option ipc_dialer_options[] = {
 	},
 };
 
-static int
+static nng_err
 ipc_dialer_set(
     void *arg, const char *nm, const void *buf, size_t sz, nni_type t)
 {
@@ -231,14 +231,14 @@ ipc_dialer_set(
 	return (nni_setopt(ipc_dialer_options, nm, d, buf, sz, t));
 }
 
-static int
+static nng_err
 ipc_dialer_get(void *arg, const char *nm, void *buf, size_t *szp, nni_type t)
 {
 	ipc_dialer *d = arg;
 	return (nni_getopt(ipc_dialer_options, nm, d, buf, szp, t));
 }
 
-int
+nng_err
 nni_ipc_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 {
 	ipc_dialer *d;
@@ -269,7 +269,7 @@ nni_ipc_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 	d->sd.sd_set          = ipc_dialer_set;
 	nni_aio_list_init(&d->aios);
 	*dp = (void *) d;
-	return (0);
+	return (NNG_OK);
 }
 
 int

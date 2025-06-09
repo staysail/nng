@@ -106,7 +106,7 @@ wstran_pipe_recv_cb(void *arg)
 }
 
 static void
-wstran_pipe_recv_cancel(nni_aio *aio, void *arg, int rv)
+wstran_pipe_recv_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ws_pipe *p = arg;
 	nni_mtx_lock(&p->mtx);
@@ -137,7 +137,7 @@ wstran_pipe_recv(void *arg, nni_aio *aio)
 }
 
 static void
-wstran_pipe_send_cancel(nni_aio *aio, void *arg, int rv)
+wstran_pipe_send_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ws_pipe *p = arg;
 	nni_mtx_lock(&p->mtx);
@@ -225,13 +225,13 @@ wstran_pipe_peer(void *arg)
 	return (p->peer);
 }
 
-static int
+static nng_err
 wstran_listener_bind(void *arg, nng_url *url)
 {
 	ws_listener *l = arg;
-	int          rv;
+	nng_err      rv;
 
-	if ((rv = nng_stream_listener_listen(l->listener)) == 0) {
+	if ((rv = nng_stream_listener_listen(l->listener)) == NNG_OK) {
 		int port;
 		nng_stream_listener_get_int(
 		    l->listener, NNG_OPT_TCP_BOUND_PORT, &port);
@@ -241,7 +241,7 @@ wstran_listener_bind(void *arg, nng_url *url)
 }
 
 static void
-wstran_listener_cancel(nni_aio *aio, void *arg, int rv)
+wstran_listener_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ws_listener *l = arg;
 
@@ -277,7 +277,7 @@ wstran_listener_accept(void *arg, nni_aio *aio)
 }
 
 static void
-wstran_dialer_cancel(nni_aio *aio, void *arg, int rv)
+wstran_dialer_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ws_dialer *d = arg;
 
@@ -328,8 +328,14 @@ wstran_pipe_getopt(
 	return (rv);
 }
 
+static size_t
+wstran_pipe_size(void)
+{
+	return (sizeof(ws_pipe));
+}
+
 static nni_sp_pipe_ops ws_pipe_ops = {
-	.p_size   = sizeof(ws_pipe),
+	.p_size   = wstran_pipe_size,
 	.p_init   = wstran_pipe_init,
 	.p_fini   = wstran_pipe_fini,
 	.p_stop   = wstran_pipe_stop,
@@ -505,12 +511,12 @@ error:
 	nni_mtx_unlock(&l->mtx);
 }
 
-static int
+static nng_err
 wstran_dialer_init(void *arg, nng_url *url, nni_dialer *ndialer)
 {
 	ws_dialer *d = arg;
 	nni_sock  *s = nni_dialer_sock(ndialer);
-	int        rv;
+	nng_err    rv;
 	char       name[64];
 
 	nni_mtx_init(&d->mtx);
@@ -524,22 +530,22 @@ wstran_dialer_init(void *arg, nng_url *url, nni_dialer *ndialer)
 	snprintf(
 	    name, sizeof(name), "%s.sp.nanomsg.org", nni_sock_peer_name(s));
 
-	if (((rv = nni_ws_dialer_alloc(&d->dialer, url)) != 0) ||
+	if (((rv = nni_ws_dialer_alloc(&d->dialer, url)) != NNG_OK) ||
 	    ((rv = nng_stream_dialer_set_bool(
-	          d->dialer, NNI_OPT_WS_MSGMODE, true)) != 0) ||
+	          d->dialer, NNI_OPT_WS_MSGMODE, true)) != NNG_OK) ||
 	    ((rv = nng_stream_dialer_set_string(
-	          d->dialer, NNG_OPT_WS_PROTOCOL, name)) != 0)) {
+	          d->dialer, NNG_OPT_WS_PROTOCOL, name)) != NNG_OK)) {
 		return (rv);
 	}
 
-	return (0);
+	return (NNG_OK);
 }
 
-static int
+static nng_err
 wstran_listener_init(void *arg, nng_url *url, nni_listener *listener)
 {
 	ws_listener *l = arg;
-	int          rv;
+	nng_err      rv;
 	nni_sock    *s = nni_listener_sock(listener);
 	char         name[64];
 
@@ -555,14 +561,14 @@ wstran_listener_init(void *arg, nng_url *url, nni_listener *listener)
 	snprintf(
 	    name, sizeof(name), "%s.sp.nanomsg.org", nni_sock_proto_name(s));
 
-	if (((rv = nni_ws_listener_alloc(&l->listener, url)) != 0) ||
+	if (((rv = nni_ws_listener_alloc(&l->listener, url)) != NNG_OK) ||
 	    ((rv = nng_stream_listener_set_bool(
-	          l->listener, NNI_OPT_WS_MSGMODE, true)) != 0) ||
+	          l->listener, NNI_OPT_WS_MSGMODE, true)) != NNG_OK) ||
 	    ((rv = nng_stream_listener_set_string(
-	          l->listener, NNG_OPT_WS_PROTOCOL, name)) != 0)) {
+	          l->listener, NNG_OPT_WS_PROTOCOL, name)) != NNG_OK)) {
 		return (rv);
 	}
-	return (0);
+	return (NNG_OK);
 }
 
 static void
@@ -582,12 +588,12 @@ static const nni_option wstran_ep_opts[] = {
 	},
 };
 
-static int
+static nng_err
 wstran_dialer_getopt(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	ws_dialer *d = arg;
-	int        rv;
+	nng_err    rv;
 
 	rv = nni_stream_dialer_get(d->dialer, name, buf, szp, t);
 	if (rv == NNG_ENOTSUP) {
@@ -596,12 +602,12 @@ wstran_dialer_getopt(
 	return (rv);
 }
 
-static int
+static nng_err
 wstran_dialer_setopt(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	ws_dialer *d = arg;
-	int        rv;
+	nng_err    rv;
 
 	rv = nni_stream_dialer_set(d->dialer, name, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -610,21 +616,21 @@ wstran_dialer_setopt(
 	return (rv);
 }
 
-static int
+static nng_err
 wstran_dialer_get_tls(void *arg, nng_tls_config **tls)
 {
 	ws_dialer *d = arg;
 	return (nni_stream_dialer_get_tls(d->dialer, tls));
 }
 
-static int
+static nng_err
 wstran_dialer_set_tls(void *arg, nng_tls_config *tls)
 {
 	ws_dialer *d = arg;
 	return (nni_stream_dialer_set_tls(d->dialer, tls));
 }
 
-static int
+static nng_err
 wstran_listener_get(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
@@ -638,12 +644,12 @@ wstran_listener_get(
 	return (rv);
 }
 
-static int
+static nng_err
 wstran_listener_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	ws_listener *l = arg;
-	int          rv;
+	nng_err      rv;
 
 	rv = nni_stream_listener_set(l->listener, name, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -652,14 +658,14 @@ wstran_listener_set(
 	return (rv);
 }
 
-static int
+static nng_err
 wstran_listener_get_tls(void *arg, nng_tls_config **tls)
 {
 	ws_listener *l = arg;
 	return (nni_stream_listener_get_tls(l->listener, tls));
 }
 
-static int
+static nng_err
 wstran_listener_set_tls(void *arg, nng_tls_config *tls)
 {
 	ws_listener *l = arg;

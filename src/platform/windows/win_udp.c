@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -36,7 +36,7 @@ static void udp_recv_start(nni_plat_udp *);
 // nni_plat_udp_open initializes a UDP socket, binding to the local
 // address specified specified.
 int
-nni_plat_udp_open(nni_plat_udp **udpp, nni_sockaddr *sa)
+nni_plat_udp_open(nni_plat_udp **udpp, const nni_sockaddr *sa)
 {
 	nni_plat_udp    *u;
 	SOCKADDR_STORAGE ss;
@@ -85,9 +85,8 @@ nni_plat_udp_open(nni_plat_udp **udpp, nni_sockaddr *sa)
 	return (rv);
 }
 
-// nni_plat_udp_close closes the underlying UDP socket.
 void
-nni_plat_udp_close(nni_plat_udp *u)
+nni_plat_udp_stop(nni_plat_udp *u)
 {
 	nni_mtx_lock(&u->lk);
 	u->closed = true;
@@ -98,6 +97,13 @@ nni_plat_udp_close(nni_plat_udp *u)
 		nni_cv_wait(&u->cv);
 	}
 	nni_mtx_unlock(&u->lk);
+}
+
+// nni_plat_udp_close closes the underlying UDP socket.
+void
+nni_plat_udp_close(nni_plat_udp *u)
+{
+	nni_plat_udp_stop(u);
 
 	if (u->s != INVALID_SOCKET) {
 		closesocket(u->s);
@@ -169,7 +175,7 @@ nni_plat_udp_send(nni_plat_udp *u, nni_aio *aio)
 }
 
 static void
-udp_recv_cancel(nni_aio *aio, void *arg, int rv)
+udp_recv_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_plat_udp *u = arg;
 	nni_mtx_lock(&u->lk);

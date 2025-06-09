@@ -181,11 +181,11 @@ static void ws_read_cb(void *);
 static void ws_write_cb(void *);
 static void ws_close_error(nni_ws *ws, uint16_t code);
 
-static void ws_str_free(void *);
-static void ws_str_close(void *);
-static void ws_str_send(void *, nng_aio *);
-static void ws_str_recv(void *, nng_aio *);
-static int  ws_str_get(void *, const char *, void *, size_t *, nni_type);
+static void    ws_str_free(void *);
+static void    ws_str_close(void *);
+static void    ws_str_send(void *, nng_aio *);
+static void    ws_str_recv(void *, nng_aio *);
+static nng_err ws_str_get(void *, const char *, void *, size_t *, nni_type);
 
 static void ws_listener_close(void *);
 static void ws_listener_free(void *);
@@ -547,7 +547,7 @@ ws_start_write(nni_ws *ws)
 }
 
 static void
-ws_cancel_close(nni_aio *aio, void *arg, int rv)
+ws_cancel_close(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ws *ws = arg;
 	nni_mtx_lock(&ws->mtx);
@@ -653,7 +653,7 @@ ws_write_cb(void *arg)
 }
 
 static void
-ws_write_cancel(nni_aio *aio, void *arg, int rv)
+ws_write_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ws   *ws = arg;
 	ws_frame *frame;
@@ -1108,7 +1108,7 @@ ws_read_cb(void *arg)
 }
 
 static void
-ws_read_cancel(nni_aio *aio, void *arg, int rv)
+ws_read_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ws *ws = arg;
 
@@ -1607,7 +1607,7 @@ err:
 }
 
 static void
-ws_accept_cancel(nni_aio *aio, void *arg, int rv)
+ws_accept_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ws_listener *l = arg;
 
@@ -1688,11 +1688,11 @@ nni_ws_listener_hook(
 	nni_mtx_unlock(&l->mtx);
 }
 
-static int
+static nng_err
 ws_listener_listen(void *arg)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 
 	nni_mtx_lock(&l->mtx);
 	if (l->closed) {
@@ -1704,14 +1704,15 @@ ws_listener_listen(void *arg)
 		return (NNG_ESTATE);
 	}
 
-	if ((rv = nni_http_server_add_handler(l->server, l->handler)) != 0) {
+	if ((rv = nni_http_server_add_handler(l->server, l->handler)) !=
+	    NNG_OK) {
 		nni_http_server_fini(l->server);
 		l->server = NULL;
 		nni_mtx_unlock(&l->mtx);
 		return (rv);
 	}
 
-	if ((rv = nni_http_server_start(l->server)) != 0) {
+	if ((rv = nni_http_server_start(l->server)) != NNG_OK) {
 		nni_http_server_del_handler(l->server, l->handler);
 		nni_http_server_fini(l->server);
 		l->server = NULL;
@@ -1722,20 +1723,20 @@ ws_listener_listen(void *arg)
 	l->started = true;
 
 	nni_mtx_unlock(&l->mtx);
-	return (0);
+	return (NNG_OK);
 }
 
-static int
+static nng_err
 ws_listener_set_size(
     nni_ws_listener *l, size_t *valp, const void *buf, size_t sz, nni_type t)
 {
-	size_t val;
-	int    rv;
+	size_t  val;
+	nng_err rv;
 
 	// Max size is limited to 4 GB, but you really never want to have
 	// to have a larger value.  If you think you need that, you're doing it
 	// wrong.  You *can* set the size to 0 for unlimited.
-	if ((rv = nni_copyin_size(&val, buf, sz, 0, NNI_MAXSZ, t)) == 0) {
+	if ((rv = nni_copyin_size(&val, buf, sz, 0, NNI_MAXSZ, t)) == NNG_OK) {
 		nni_mtx_lock(&l->mtx);
 		*valp = val;
 		nni_mtx_unlock(&l->mtx);
@@ -1743,7 +1744,7 @@ ws_listener_set_size(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get_size(
     nni_ws_listener *l, size_t *valp, void *buf, size_t *szp, nni_type t)
 {
@@ -1754,55 +1755,55 @@ ws_listener_get_size(
 	return (nni_copyout_size(val, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_listener_set_maxframe(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_set_size(l, &l->maxframe, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_listener_get_maxframe(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_get_size(l, &l->maxframe, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_listener_set_fragsize(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_set_size(l, &l->fragsize, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_listener_get_fragsize(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_get_size(l, &l->fragsize, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_listener_set_recvmax(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_set_size(l, &l->recvmax, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_listener_get_recvmax(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
 	return (ws_listener_get_size(l, &l->recvmax, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_listener_set_proto(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 
-	if ((rv = ws_check_string(buf, sz, t)) == 0) {
+	if ((rv = ws_check_string(buf, sz, t)) == NNG_OK) {
 		char *ns;
 		if ((ns = nni_strdup(buf)) == NULL) {
 			rv = NNG_ENOMEM;
@@ -1818,25 +1819,25 @@ ws_listener_set_proto(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get_proto(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	nni_mtx_lock(&l->mtx);
 	rv = nni_copyout_str(l->proto != NULL ? l->proto : "", buf, szp, t);
 	nni_mtx_unlock(&l->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	bool             b;
 
-	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&l->mtx);
 		l->isstream = !b;
 		nni_mtx_unlock(&l->mtx);
@@ -1844,14 +1845,14 @@ ws_listener_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	bool             b;
 
-	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&l->mtx);
 		l->recv_text = b;
 		nni_mtx_unlock(&l->mtx);
@@ -1859,14 +1860,14 @@ ws_listener_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	bool             b;
 
-	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&l->mtx);
 		l->send_text = b;
 		nni_mtx_unlock(&l->mtx);
@@ -1874,22 +1875,22 @@ ws_listener_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	nni_mtx_lock(&l->mtx);
 	rv = nni_copyout_bool(l->recv_text, buf, szp, t);
 	nni_mtx_unlock(&l->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 	nni_mtx_lock(&l->mtx);
 	rv = nni_copyout_bool(l->send_text, buf, szp, t);
 	nni_mtx_unlock(&l->mtx);
@@ -1936,13 +1937,13 @@ static const nni_option ws_listener_options[] = {
 	},
 };
 
-static int
+static nng_err
 ws_listener_set_header(nni_ws_listener *l, const char *name, const void *buf,
     size_t sz, nni_type t)
 {
-	int rv;
+	nng_err rv;
 	name += strlen(NNG_OPT_WS_HEADER);
-	if ((rv = ws_check_string(buf, sz, t)) == 0) {
+	if ((rv = ws_check_string(buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&l->mtx);
 		rv = ws_set_header(&l->headers, name, buf);
 		nni_mtx_unlock(&l->mtx);
@@ -1950,12 +1951,12 @@ ws_listener_set_header(nni_ws_listener *l, const char *name, const void *buf,
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 
 	rv = nni_setopt(ws_listener_options, name, l, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -1970,12 +1971,12 @@ ws_listener_set(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_listener *l = arg;
-	int              rv;
+	nng_err          rv;
 
 	rv = nni_getopt(ws_listener_options, name, l, buf, szp, t);
 	if (rv == NNG_ENOTSUP) {
@@ -1984,25 +1985,25 @@ ws_listener_get(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_listener_get_tls(void *arg, nng_tls_config **cfgp)
 {
 	nni_ws_listener *l = arg;
 	return (nni_http_server_get_tls(l->server, cfgp));
 }
 
-static int
+static nng_err
 ws_listener_set_tls(void *arg, nng_tls_config *cfg)
 {
 	nni_ws_listener *l = arg;
 	return (nni_http_server_set_tls(l->server, cfg));
 }
 
-int
+nng_err
 nni_ws_listener_alloc(nng_stream_listener **wslp, const nng_url *url)
 {
 	nni_ws_listener *l;
-	int              rv;
+	nng_err          rv;
 	char            *host;
 
 	if ((l = NNI_ALLOC_STRUCT(l)) == NULL) {
@@ -2054,7 +2055,7 @@ nni_ws_listener_alloc(nng_stream_listener **wslp, const nng_url *url)
 	l->ops.sl_get_tls = ws_listener_get_tls;
 	l->ops.sl_set_tls = ws_listener_set_tls;
 	*wslp             = (void *) l;
-	return (0);
+	return (NNG_OK);
 }
 
 void
@@ -2203,7 +2204,7 @@ ws_dialer_free(void *arg)
 }
 
 static void
-ws_dial_cancel(nni_aio *aio, void *arg, int rv)
+ws_dial_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	nni_ws *ws = arg;
 
@@ -2253,11 +2254,11 @@ ws_dialer_dial(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&d->mtx);
 }
 
-static int
+static nng_err
 ws_dialer_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	bool           b;
 
 	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
@@ -2268,14 +2269,14 @@ ws_dialer_set_msgmode(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	bool           b;
 
-	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&d->mtx);
 		d->recv_text = b;
 		nni_mtx_unlock(&d->mtx);
@@ -2283,14 +2284,14 @@ ws_dialer_set_recv_text(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	bool           b;
 
-	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == 0) {
+	if ((rv = nni_copyin_bool(&b, buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&d->mtx);
 		d->send_text = b;
 		nni_mtx_unlock(&d->mtx);
@@ -2298,17 +2299,17 @@ ws_dialer_set_send_text(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_set_size(
     nni_ws_dialer *d, size_t *valp, const void *buf, size_t sz, nni_type t)
 {
-	size_t val;
-	int    rv;
+	size_t  val;
+	nng_err rv;
 
 	// Max size is limited to 4 GB, but you really never want to have
 	// to have a larger value.  If you think you need that, you're doing it
 	// wrong.  You *can* set the size to 0 for unlimited.
-	if ((rv = nni_copyin_size(&val, buf, sz, 0, NNI_MAXSZ, t)) == 0) {
+	if ((rv = nni_copyin_size(&val, buf, sz, 0, NNI_MAXSZ, t)) == NNG_OK) {
 		nni_mtx_lock(&d->mtx);
 		*valp = val;
 		nni_mtx_unlock(&d->mtx);
@@ -2316,7 +2317,7 @@ ws_dialer_set_size(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get_size(
     nni_ws_dialer *d, size_t *valp, void *buf, size_t *szp, nni_type t)
 {
@@ -2327,55 +2328,55 @@ ws_dialer_get_size(
 	return (nni_copyout_size(val, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_dialer_set_maxframe(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_set_size(d, &d->maxframe, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_dialer_get_maxframe(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_get_size(d, &d->maxframe, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_dialer_set_fragsize(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_set_size(d, &d->fragsize, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_dialer_get_fragsize(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_get_size(d, &d->fragsize, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_dialer_set_recvmax(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_set_size(d, &d->recvmax, buf, sz, t));
 }
 
-static int
+static nng_err
 ws_dialer_get_recvmax(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
 	return (ws_dialer_get_size(d, &d->recvmax, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_dialer_set_proto(void *arg, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 
-	if ((rv = ws_check_string(buf, sz, t)) == 0) {
+	if ((rv = ws_check_string(buf, sz, t)) == NNG_OK) {
 		char *ns;
 		if ((ns = nni_strdup(buf)) == NULL) {
 			rv = NNG_ENOMEM;
@@ -2391,33 +2392,33 @@ ws_dialer_set_proto(void *arg, const void *buf, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get_proto(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	nni_mtx_lock(&d->mtx);
 	rv = nni_copyout_str(d->proto != NULL ? d->proto : "", buf, szp, t);
 	nni_mtx_unlock(&d->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	nni_mtx_lock(&d->mtx);
 	rv = nni_copyout_bool(d->recv_text, buf, szp, t);
 	nni_mtx_unlock(&d->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 	nni_mtx_lock(&d->mtx);
 	rv = nni_copyout_bool(d->send_text, buf, szp, t);
 	nni_mtx_unlock(&d->mtx);
@@ -2465,13 +2466,13 @@ static const nni_option ws_dialer_options[] = {
 	},
 };
 
-static int
+static nng_err
 ws_dialer_set_header(
     nni_ws_dialer *d, const char *name, const void *buf, size_t sz, nni_type t)
 {
-	int rv;
+	nng_err rv;
 	name += strlen(NNG_OPT_WS_HEADER);
-	if ((rv = ws_check_string(buf, sz, t)) == 0) {
+	if ((rv = ws_check_string(buf, sz, t)) == NNG_OK) {
 		nni_mtx_lock(&d->mtx);
 		rv = ws_set_header(&d->headers, name, buf);
 		nni_mtx_unlock(&d->mtx);
@@ -2479,12 +2480,12 @@ ws_dialer_set_header(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 
 	rv = nni_setopt(ws_dialer_options, name, d, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -2499,11 +2500,11 @@ ws_dialer_set(
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws_dialer *d = arg;
-	int            rv;
+	nng_err        rv;
 
 	rv = nni_getopt(ws_dialer_options, name, d, buf, szp, t);
 	if (rv == NNG_ENOTSUP) {
@@ -2512,25 +2513,25 @@ ws_dialer_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ws_dialer_get_tls(void *arg, nng_tls_config **cfgp)
 {
 	nni_ws_dialer *d = arg;
 	return (nni_http_client_get_tls(d->client, cfgp));
 }
 
-static int
+static nng_err
 ws_dialer_set_tls(void *arg, nng_tls_config *cfg)
 {
 	nni_ws_dialer *d = arg;
 	return (nni_http_client_set_tls(d->client, cfg));
 }
 
-int
+nng_err
 nni_ws_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 {
 	nni_ws_dialer *d;
-	int            rv;
+	nng_err        rv;
 
 	if ((d = NNI_ALLOC_STRUCT(d)) == NULL) {
 		return (NNG_ENOMEM);
@@ -2564,7 +2565,7 @@ nni_ws_dialer_alloc(nng_stream_dialer **dp, const nng_url *url)
 	d->ops.sd_set_tls = ws_dialer_set_tls;
 	d->ops.sd_get_tls = ws_dialer_get_tls;
 	*dp               = (void *) d;
-	return (0);
+	return (NNG_OK);
 }
 
 // Dialer does not get a hook chance, as it can examine the request
@@ -2668,14 +2669,14 @@ ws_str_recv(void *arg, nng_aio *aio)
 	nni_mtx_unlock(&ws->mtx);
 }
 
-static int
+static nng_err
 ws_get_request_uri(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws *ws = arg;
 	return (nni_copyout_str(nni_http_get_uri(ws->http), buf, szp, t));
 }
 
-static int
+static nng_err
 ws_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws *ws = arg;
@@ -2687,7 +2688,7 @@ ws_get_recv_text(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_bool(b, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws *ws = arg;
@@ -2717,7 +2718,7 @@ static const nni_option ws_options[] = {
 	},
 };
 
-static int
+static nng_err
 ws_get_header(nni_ws *ws, const char *nm, void *buf, size_t *szp, nni_type t)
 {
 	const char *s;
@@ -2729,11 +2730,11 @@ ws_get_header(nni_ws *ws, const char *nm, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_str(s, buf, szp, t));
 }
 
-static int
+static nng_err
 ws_str_get(void *arg, const char *nm, void *buf, size_t *szp, nni_type t)
 {
 	nni_ws *ws = arg;
-	int     rv;
+	nng_err rv;
 
 	nni_mtx_lock(&ws->mtx);
 	if (ws->closed) {

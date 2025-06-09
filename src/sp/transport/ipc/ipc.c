@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -413,7 +413,7 @@ error:
 }
 
 static void
-ipc_pipe_send_cancel(nni_aio *aio, void *arg, int rv)
+ipc_pipe_send_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ipc_pipe *p = arg;
 
@@ -500,7 +500,7 @@ ipc_pipe_send(void *arg, nni_aio *aio)
 }
 
 static void
-ipc_pipe_recv_cancel(nni_aio *aio, void *arg, int rv)
+ipc_pipe_recv_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ipc_pipe *p = arg;
 
@@ -795,47 +795,48 @@ ipc_ep_init(ipc_ep *ep, nni_sock *sock, void (*conn_cb)(void *))
 #endif
 }
 
-static int
+static nng_err
 ipc_ep_init_dialer(void *arg, nng_url *url, nni_dialer *dialer)
 {
 	ipc_ep   *ep = arg;
-	int       rv;
+	nng_err   rv;
 	nni_sock *sock = nni_dialer_sock(dialer);
 
 	ipc_ep_init(ep, sock, ipc_ep_dial_cb);
 	ep->ndialer = dialer;
 
-	if ((rv = nng_stream_dialer_alloc_url(&ep->dialer, url)) != 0) {
+	if ((rv = nng_stream_dialer_alloc_url(&ep->dialer, url)) != NNG_OK) {
 		return (rv);
 	}
 #ifdef NNG_ENABLE_STATS
 	nni_dialer_add_stat(dialer, &ep->st_rcv_max);
 #endif
-	return (0);
+	return (NNG_OK);
 }
 
-static int
+static nng_err
 ipc_ep_init_listener(void *arg, nng_url *url, nni_listener *listener)
 {
 	ipc_ep   *ep = arg;
-	int       rv;
+	nng_err   rv;
 	nni_sock *sock = nni_listener_sock(listener);
 
 	ipc_ep_init(ep, sock, ipc_ep_accept_cb);
 	ep->nlistener = listener;
 
-	if ((rv = nng_stream_listener_alloc_url(&ep->listener, url)) != 0) {
+	if ((rv = nng_stream_listener_alloc_url(&ep->listener, url)) !=
+	    NNG_OK) {
 		return (rv);
 	}
 
 #ifdef NNG_ENABLE_STATS
 	nni_listener_add_stat(listener, &ep->st_rcv_max);
 #endif
-	return (0);
+	return (NNG_OK);
 }
 
 static void
-ipc_ep_cancel(nni_aio *aio, void *arg, int rv)
+ipc_ep_cancel(nni_aio *aio, void *arg, nng_err rv)
 {
 	ipc_ep *ep = arg;
 	nni_mtx_lock(&ep->mtx);
@@ -873,24 +874,24 @@ ipc_ep_connect(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&ep->mtx);
 }
 
-static int
+static nng_err
 ipc_ep_get_recv_max_sz(void *arg, void *v, size_t *szp, nni_type t)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 	nni_mtx_lock(&ep->mtx);
 	rv = nni_copyout_size(ep->rcv_max, v, szp, t);
 	nni_mtx_unlock(&ep->mtx);
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_ep_set_recv_max_sz(void *arg, const void *v, size_t sz, nni_type t)
 {
 	ipc_ep *ep = arg;
 	size_t  val;
-	int     rv;
-	if ((rv = nni_copyin_size(&val, v, sz, 0, NNI_MAXSZ, t)) == 0) {
+	nng_err rv;
+	if ((rv = nni_copyin_size(&val, v, sz, 0, NNI_MAXSZ, t)) == NNG_OK) {
 
 		nni_mtx_lock(&ep->mtx);
 		ep->rcv_max = val;
@@ -902,11 +903,11 @@ ipc_ep_set_recv_max_sz(void *arg, const void *v, size_t sz, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_ep_bind(void *arg, nng_url *url)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 	NNI_ARG_UNUSED(url);
 
 	nni_mtx_lock(&ep->mtx);
@@ -955,8 +956,14 @@ ipc_pipe_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 	return (nni_stream_get(p->conn, name, buf, szp, t));
 }
 
+static size_t
+ipc_pipe_size(void)
+{
+	return (sizeof(ipc_pipe));
+}
+
 static nni_sp_pipe_ops ipc_tran_pipe_ops = {
-	.p_size   = sizeof(ipc_pipe),
+	.p_size   = ipc_pipe_size,
 	.p_init   = ipc_pipe_init,
 	.p_fini   = ipc_pipe_fini,
 	.p_stop   = ipc_pipe_stop,
@@ -979,11 +986,11 @@ static const nni_option ipc_ep_options[] = {
 	},
 };
 
-static int
+static nng_err
 ipc_dialer_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 
 	rv = nni_getopt(ipc_ep_options, name, ep, buf, szp, t);
 	if (rv == NNG_ENOTSUP) {
@@ -992,12 +999,12 @@ ipc_dialer_get(void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_dialer_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 
 	rv = nni_setopt(ipc_ep_options, name, ep, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -1006,12 +1013,12 @@ ipc_dialer_set(
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_listener_get(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 
 	rv = nni_getopt(ipc_ep_options, name, ep, buf, szp, t);
 	if (rv == NNG_ENOTSUP) {
@@ -1020,12 +1027,12 @@ ipc_listener_get(
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_listener_set(
     void *arg, const char *name, const void *buf, size_t sz, nni_type t)
 {
 	ipc_ep *ep = arg;
-	int     rv;
+	nng_err rv;
 
 	rv = nni_setopt(ipc_ep_options, name, ep, buf, sz, t);
 	if (rv == NNG_ENOTSUP) {
@@ -1034,7 +1041,7 @@ ipc_listener_set(
 	return (rv);
 }
 
-static int
+static nng_err
 ipc_listener_set_sec_desc(void *arg, void *pdesc)
 {
 	ipc_ep *ep = arg;

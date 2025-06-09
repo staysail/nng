@@ -340,8 +340,8 @@ typedef struct nni_ipc_listener nni_ipc_listener;
 // IPC is so different from platform to platform.  The following should
 // be implemented.  If IPC isn't supported, all of these functions should
 // be stubs that just return NNG_ENOTSUP.
-extern int nni_ipc_dialer_alloc(nng_stream_dialer **, const nng_url *);
-extern int nni_ipc_listener_alloc(nng_stream_listener **, const nng_url *);
+extern nng_err nni_ipc_dialer_alloc(nng_stream_dialer **, const nng_url *);
+extern nng_err nni_ipc_listener_alloc(nng_stream_listener **, const nng_url *);
 
 //
 // UDP support. UDP is not connection oriented, and only has the notion
@@ -357,7 +357,11 @@ typedef struct nni_plat_udp nni_plat_udp;
 // address specified in the AIO.  The remote address is
 // not used.  The resulting nni_plat_udp structure is returned in the
 // aio's a_pipe.
-extern int nni_plat_udp_open(nni_plat_udp **, nni_sockaddr *);
+extern int nni_plat_udp_open(nni_plat_udp **, const nni_sockaddr *);
+
+// nni_plat_udp_stop stops I/O on the socket, but does not close it
+// or free the underlying data.  May block for callbacks to complete.
+extern void nni_plat_udp_stop(nni_plat_udp *);
 
 // nni_plat_udp_close closes the underlying UDP socket.
 extern void nni_plat_udp_close(nni_plat_udp *);

@@ -202,8 +202,8 @@ struct nng_sockaddr_path {
 struct nng_sockaddr_in6 {
 	uint16_t sa_family;
 	uint16_t sa_port;
+	uint32_t sa_scope; // scope moved here to make sa_addr 64-bit aligned
 	uint8_t  sa_addr[16];
-	uint32_t sa_scope;
 };
 
 struct nng_sockaddr_in {
@@ -305,7 +305,7 @@ NNG_DECL int nng_socket_raw(nng_socket id, bool *rawp);
 
 // Utility function for getting a printable form of the socket address
 // for display in logs, etc.  It is not intended to be parsed, and the
-// display format may change without notice.  Generally you should alow
+// display format may change without notice.  Generally you should allow
 // at least NNG_MAXADDRSTRLEN if you want to avoid typical truncations.
 // It is still possible for very long IPC paths to be truncated, but that
 // is an edge case and applications that pass such long paths should
@@ -315,9 +315,22 @@ NNG_DECL const char *nng_str_sockaddr(
     const nng_sockaddr *sa, char *buf, size_t bufsz);
 
 // Obtain a port number (for NNG_AF_INET and NNG_AF_INET6this will be 16 bits
-// maximum, but other address familiies may have larger port numbers.)  For
+// maximum, but other address families may have larger port numbers.)  For
 // address that don't have the concept of port numbers, zero will be returned.
-uint32_t nng_sockaddr_port(const nng_sockaddr *sa);
+NNG_DECL uint32_t nng_sockaddr_port(const nng_sockaddr *sa);
+
+// Compare two socket addresses. Returns true if they are equal, false
+// otherwise.
+NNG_DECL bool nng_sockaddr_equal(
+    const nng_sockaddr *sa1, const nng_sockaddr *sa2);
+
+// Generate a quick non-zero 64-bit value for the sockaddr.
+// This should usually be unique, but collisions are possible.
+// The resulting hash is not portable between systems, and may not
+// be portable from one version of NNG to the next.
+//
+// The intended use is to allow creation of an index for use with id maps.
+NNG_DECL uint64_t nng_sockaddr_hash(const nng_sockaddr *sa);
 
 // Arguably the pipe callback functions could be handled as an option,
 // but with the need to specify an argument, we find it best to unify
@@ -442,7 +455,7 @@ NNG_DECL const char *nng_strerror(nng_err);
 // received the data.  The return value will be zero to indicate that the
 // socket has accepted the entire data for send, or an errno to indicate
 // failure.  The flags may include NNG_FLAG_NONBLOCK.
-NNG_DECL int nng_send(nng_socket, void *, size_t, int);
+NNG_DECL int nng_send(nng_socket, const void *, size_t, int);
 
 // nng_recv receives message data into the socket, up to the supplied size.
 // The actual size of the message data will be written to the value pointed
@@ -680,7 +693,7 @@ NNG_DECL void nng_aio_finish(nng_aio *, int);
 // This returns false if the operation cannot be deferred (because the AIO
 // has been stopped with nng_aio_stop.)  If it does so, then the aio's
 // completion callback will fire with a result of NNG_ESTOPPED.
-typedef void (*nng_aio_cancelfn)(nng_aio *, void *, int);
+typedef void (*nng_aio_cancelfn)(nng_aio *, void *, nng_err);
 NNG_DECL bool nng_aio_start(nng_aio *, nng_aio_cancelfn, void *);
 
 // nng_aio_sleep does a "sleeping" operation, basically does nothing
@@ -1041,7 +1054,7 @@ NNG_DECL uint64_t nng_stat_timestamp(const nng_stat *);
 // This version is synchronous, which means the caller will block until
 // one of the sockets is closed. Note that caller is responsible for
 // finally closing both sockets when this function returns.
-NNG_DECL int nng_device(nng_socket, nng_socket);
+NNG_DECL nng_err nng_device(nng_socket, nng_socket);
 
 // Asynchronous form of nng_device.  When this succeeds, the device is
 // left intact and functioning in the background, until one of the sockets
@@ -1061,13 +1074,13 @@ NNG_DECL void nng_device_aio(nng_aio *, nng_socket, nng_socket);
 // port if one isn't specified and a default port is appropriate for
 // the scheme.  The URL structure is allocated, along with individual
 // members.  It can be freed with nng_url_free.
-NNG_DECL int nng_url_parse(nng_url **, const char *);
+NNG_DECL nng_err nng_url_parse(nng_url **, const char *);
 
 // nng_url_free frees a URL structure that was created by nng_url_parse().
 NNG_DECL void nng_url_free(nng_url *);
 
 // nng_url_clone clones a URL structure.
-NNG_DECL int nng_url_clone(nng_url **, const nng_url *);
+NNG_DECL nng_err nng_url_clone(nng_url **, const nng_url *);
 
 // nng_url_sprintf prints a URL to a string using semantics similar to
 // snprintf.
@@ -1111,106 +1124,111 @@ typedef struct nng_stream          nng_stream;
 typedef struct nng_stream_dialer   nng_stream_dialer;
 typedef struct nng_stream_listener nng_stream_listener;
 
-NNG_DECL void nng_stream_free(nng_stream *);
-NNG_DECL void nng_stream_close(nng_stream *);
-NNG_DECL void nng_stream_stop(nng_stream *);
-NNG_DECL void nng_stream_send(nng_stream *, nng_aio *);
-NNG_DECL void nng_stream_recv(nng_stream *, nng_aio *);
-NNG_DECL int  nng_stream_get_bool(nng_stream *, const char *, bool *);
-NNG_DECL int  nng_stream_get_int(nng_stream *, const char *, int *);
-NNG_DECL int  nng_stream_get_ms(nng_stream *, const char *, nng_duration *);
-NNG_DECL int  nng_stream_get_size(nng_stream *, const char *, size_t *);
-NNG_DECL int  nng_stream_get_uint64(nng_stream *, const char *, uint64_t *);
-NNG_DECL int  nng_stream_get_string(nng_stream *, const char *, char **);
-NNG_DECL int  nng_stream_get_addr(nng_stream *, const char *, nng_sockaddr *);
+NNG_DECL void    nng_stream_free(nng_stream *);
+NNG_DECL void    nng_stream_close(nng_stream *);
+NNG_DECL void    nng_stream_stop(nng_stream *);
+NNG_DECL void    nng_stream_send(nng_stream *, nng_aio *);
+NNG_DECL void    nng_stream_recv(nng_stream *, nng_aio *);
+NNG_DECL nng_err nng_stream_get_bool(nng_stream *, const char *, bool *);
+NNG_DECL nng_err nng_stream_get_int(nng_stream *, const char *, int *);
+NNG_DECL nng_err nng_stream_get_ms(nng_stream *, const char *, nng_duration *);
+NNG_DECL nng_err nng_stream_get_size(nng_stream *, const char *, size_t *);
+NNG_DECL nng_err nng_stream_get_uint64(nng_stream *, const char *, uint64_t *);
+NNG_DECL nng_err nng_stream_get_string(nng_stream *, const char *, char **);
+NNG_DECL nng_err nng_stream_get_addr(
+    nng_stream *, const char *, nng_sockaddr *);
 
-NNG_DECL int nng_stream_dialer_alloc(nng_stream_dialer **, const char *);
-NNG_DECL int nng_stream_dialer_alloc_url(
+NNG_DECL nng_err nng_stream_dialer_alloc(nng_stream_dialer **, const char *);
+NNG_DECL nng_err nng_stream_dialer_alloc_url(
     nng_stream_dialer **, const nng_url *);
-NNG_DECL void nng_stream_dialer_free(nng_stream_dialer *);
-NNG_DECL void nng_stream_dialer_close(nng_stream_dialer *);
-NNG_DECL void nng_stream_dialer_stop(nng_stream_dialer *);
-NNG_DECL void nng_stream_dialer_dial(nng_stream_dialer *, nng_aio *);
-NNG_DECL int  nng_stream_dialer_get_bool(
-     nng_stream_dialer *, const char *, bool *);
-NNG_DECL int nng_stream_dialer_get_int(
+NNG_DECL void    nng_stream_dialer_free(nng_stream_dialer *);
+NNG_DECL void    nng_stream_dialer_close(nng_stream_dialer *);
+NNG_DECL void    nng_stream_dialer_stop(nng_stream_dialer *);
+NNG_DECL void    nng_stream_dialer_dial(nng_stream_dialer *, nng_aio *);
+NNG_DECL nng_err nng_stream_dialer_get_bool(
+    nng_stream_dialer *, const char *, bool *);
+NNG_DECL nng_err nng_stream_dialer_get_int(
     nng_stream_dialer *, const char *, int *);
-NNG_DECL int nng_stream_dialer_get_ms(
+NNG_DECL nng_err nng_stream_dialer_get_ms(
     nng_stream_dialer *, const char *, nng_duration *);
-NNG_DECL int nng_stream_dialer_get_size(
+NNG_DECL nng_err nng_stream_dialer_get_size(
     nng_stream_dialer *, const char *, size_t *);
-NNG_DECL int nng_stream_dialer_get_uint64(
+NNG_DECL nng_err nng_stream_dialer_get_uint64(
     nng_stream_dialer *, const char *, uint64_t *);
-NNG_DECL int nng_stream_dialer_get_string(
+NNG_DECL nng_err nng_stream_dialer_get_string(
     nng_stream_dialer *, const char *, char **);
-NNG_DECL int nng_stream_dialer_get_addr(
+NNG_DECL nng_err nng_stream_dialer_get_addr(
     nng_stream_dialer *, const char *, nng_sockaddr *);
-NNG_DECL int nng_stream_dialer_set_bool(
+NNG_DECL nng_err nng_stream_dialer_set_bool(
     nng_stream_dialer *, const char *, bool);
-NNG_DECL int nng_stream_dialer_set_int(nng_stream_dialer *, const char *, int);
-NNG_DECL int nng_stream_dialer_set_ms(
+NNG_DECL nng_err nng_stream_dialer_set_int(
+    nng_stream_dialer *, const char *, int);
+NNG_DECL nng_err nng_stream_dialer_set_ms(
     nng_stream_dialer *, const char *, nng_duration);
-NNG_DECL int nng_stream_dialer_set_size(
+NNG_DECL nng_err nng_stream_dialer_set_size(
     nng_stream_dialer *, const char *, size_t);
-NNG_DECL int nng_stream_dialer_set_uint64(
+NNG_DECL nng_err nng_stream_dialer_set_uint64(
     nng_stream_dialer *, const char *, uint64_t);
-NNG_DECL int nng_stream_dialer_set_string(
+NNG_DECL nng_err nng_stream_dialer_set_string(
     nng_stream_dialer *, const char *, const char *);
-NNG_DECL int nng_stream_dialer_set_addr(
+NNG_DECL nng_err nng_stream_dialer_set_addr(
     nng_stream_dialer *, const char *, const nng_sockaddr *);
 
 // Note that when configuring the object, a hold is placed on the TLS
 // configuration, using a reference count.  When retrieving the object, no such
 // hold is placed, and so the caller must take care not to use the associated
 // object after the endpoint it is associated with is closed.
-NNG_DECL int nng_stream_dialer_get_tls(nng_stream_dialer *, nng_tls_config **);
-NNG_DECL int nng_stream_dialer_set_tls(nng_stream_dialer *, nng_tls_config *);
+NNG_DECL nng_err nng_stream_dialer_get_tls(
+    nng_stream_dialer *, nng_tls_config **);
+NNG_DECL nng_err nng_stream_dialer_set_tls(
+    nng_stream_dialer *, nng_tls_config *);
 
-NNG_DECL int nng_stream_listener_alloc(nng_stream_listener **, const char *);
-NNG_DECL int nng_stream_listener_alloc_url(
+NNG_DECL nng_err nng_stream_listener_alloc(
+    nng_stream_listener **, const char *);
+NNG_DECL nng_err nng_stream_listener_alloc_url(
     nng_stream_listener **, const nng_url *);
-NNG_DECL void nng_stream_listener_free(nng_stream_listener *);
-NNG_DECL void nng_stream_listener_close(nng_stream_listener *);
-NNG_DECL void nng_stream_listener_stop(nng_stream_listener *);
-NNG_DECL int  nng_stream_listener_listen(nng_stream_listener *);
-NNG_DECL void nng_stream_listener_accept(nng_stream_listener *, nng_aio *);
-NNG_DECL int  nng_stream_listener_get_bool(
-     nng_stream_listener *, const char *, bool *);
-NNG_DECL int nng_stream_listener_get_int(
+NNG_DECL void    nng_stream_listener_free(nng_stream_listener *);
+NNG_DECL void    nng_stream_listener_close(nng_stream_listener *);
+NNG_DECL void    nng_stream_listener_stop(nng_stream_listener *);
+NNG_DECL nng_err nng_stream_listener_listen(nng_stream_listener *);
+NNG_DECL void    nng_stream_listener_accept(nng_stream_listener *, nng_aio *);
+NNG_DECL nng_err nng_stream_listener_get_bool(
+    nng_stream_listener *, const char *, bool *);
+NNG_DECL nng_err nng_stream_listener_get_int(
     nng_stream_listener *, const char *, int *);
-NNG_DECL int nng_stream_listener_get_ms(
+NNG_DECL nng_err nng_stream_listener_get_ms(
     nng_stream_listener *, const char *, nng_duration *);
-NNG_DECL int nng_stream_listener_get_size(
+NNG_DECL nng_err nng_stream_listener_get_size(
     nng_stream_listener *, const char *, size_t *);
-NNG_DECL int nng_stream_listener_get_uint64(
+NNG_DECL nng_err nng_stream_listener_get_uint64(
     nng_stream_listener *, const char *, uint64_t *);
-NNG_DECL int nng_stream_listener_get_string(
+NNG_DECL nng_err nng_stream_listener_get_string(
     nng_stream_listener *, const char *, char **);
-NNG_DECL int nng_stream_listener_get_addr(
+NNG_DECL nng_err nng_stream_listener_get_addr(
     nng_stream_listener *, const char *, nng_sockaddr *);
-NNG_DECL int nng_stream_listener_set_bool(
+NNG_DECL nng_err nng_stream_listener_set_bool(
     nng_stream_listener *, const char *, bool);
-NNG_DECL int nng_stream_listener_set_int(
+NNG_DECL nng_err nng_stream_listener_set_int(
     nng_stream_listener *, const char *, int);
-NNG_DECL int nng_stream_listener_set_ms(
+NNG_DECL nng_err nng_stream_listener_set_ms(
     nng_stream_listener *, const char *, nng_duration);
-NNG_DECL int nng_stream_listener_set_size(
+NNG_DECL nng_err nng_stream_listener_set_size(
     nng_stream_listener *, const char *, size_t);
-NNG_DECL int nng_stream_listener_set_uint64(
+NNG_DECL nng_err nng_stream_listener_set_uint64(
     nng_stream_listener *, const char *, uint64_t);
-NNG_DECL int nng_stream_listener_set_string(
+NNG_DECL nng_err nng_stream_listener_set_string(
     nng_stream_listener *, const char *, const char *);
-NNG_DECL int nng_stream_listener_set_addr(
+NNG_DECL nng_err nng_stream_listener_set_addr(
     nng_stream_listener *, const char *, const nng_sockaddr *);
 
-NNG_DECL int nng_stream_listener_get_tls(
+NNG_DECL nng_err nng_stream_listener_get_tls(
     nng_stream_listener *, nng_tls_config **);
-NNG_DECL int nng_stream_listener_set_tls(
+NNG_DECL nng_err nng_stream_listener_set_tls(
     nng_stream_listener *, nng_tls_config *);
 
 // Security Descriptor only valid for IPC streams on Windows
 // Parameter is a PSECURITY_DESCRIPTOR.
-NNG_DECL int nng_stream_listener_set_security_descriptor(
+NNG_DECL nng_err nng_stream_listener_set_security_descriptor(
     nng_stream_listener *, void *);
 
 // UDP operations.  These are provided for convenience,
@@ -1223,7 +1241,14 @@ typedef struct nng_udp nng_udp;
 // to the specified address.
 NNG_DECL int nng_udp_open(nng_udp **udpp, nng_sockaddr *sa);
 
-// nng_udp_close closes the underlying UDP socket.
+// nng_udp_stop stops the UDP socket from transferring data, before closing it.
+// This may be useful if data flows need to be stopped but freeing the
+// structure must be done at a later time.  Note that this may wait for I/O to
+// be canceled.
+NNG_DECL void nng_udp_stop(nng_udp *udp);
+
+// nng_udp_close closes the underlying UDP socket and frees the associated
+// resources. Calls nng_udp_stop implicitly.
 NNG_DECL void nng_udp_close(nng_udp *udp);
 
 // nng_udp_sockname determines the locally bound address.
@@ -1292,7 +1317,7 @@ typedef struct {
 // only the first call can contain a non-NULL params.  If already
 // initialized with non-NULL params, will return NNG_EALREADY.
 // Applications should *not* call a matching nng_fini() in that case.
-NNG_DECL nng_err nng_init(nng_init_params *parms);
+NNG_DECL nng_err nng_init(const nng_init_params *params);
 
 // nng_fini is used to terminate the library, freeing certain global resources.
 // Each call to nng_fini is paired to a call to nng_init.  The last such
@@ -1340,7 +1365,7 @@ typedef enum nng_log_facility {
 // as above.  The message ID is chosen by the submitter - internal NNG
 // messages will have MSGIDs starting with "NNG-".  The MSGID should be
 // not more than 8 characters, though this is not a hard requirement.
-// Loggers are required ot make a copy of the msgid and message if required,
+// Loggers are required to make a copy of the msgid and message if required,
 // because the values will not be valid once the logger returns.
 typedef void (*nng_logger)(nng_log_level level, nng_log_facility facility,
     const char *msgid, const char *msg);

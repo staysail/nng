@@ -76,12 +76,6 @@ psk_free(psk *p)
 	}
 }
 
-#ifdef NNG_TLS_USE_CTR_DRBG
-// Use a global RNG if we're going to override the builtin.
-static mbedtls_ctr_drbg_context rng_ctx;
-static nni_mtx                  rng_lock;
-#endif
-
 struct nng_tls_engine_conn {
 	void               *tls; // parent conn
 	mbedtls_ssl_context ctx;
@@ -134,16 +128,7 @@ tls_get_entropy(void *arg, unsigned char *buf, size_t len)
 static int
 tls_random(void *arg, unsigned char *buf, size_t sz)
 {
-#ifdef NNG_TLS_USE_CTR_DRBG
-	int rv;
-
-	nni_mtx_lock(&rng_lock);
-	rv = mbedtls_ctr_drbg_random(&rng_ctx, buf, sz);
-	nni_mtx_unlock(&rng_lock);
-	return (rv);
-#else
 	return (tls_get_entropy(arg, buf, sz));
-#endif
 }
 
 static void
@@ -453,9 +438,6 @@ config_fini(nng_tls_engine_config *cfg)
 	psk  *psk;
 
 	mbedtls_ssl_config_free(&cfg->cfg_ctx);
-#ifdef NNG_TLS_USE_CTR_DRBG
-	mbedtls_ctr_drbg_free(&cfg->rng_ctx);
-#endif
 	mbedtls_x509_crt_free(&cfg->ca_certs);
 	mbedtls_x509_crl_free(&cfg->crl);
 	if (cfg->server_name) {
@@ -779,6 +761,48 @@ config_version(nng_tls_engine_config *cfg, nng_tls_version min_ver,
 	return (0);
 }
 
+static nng_err
+tls_engine_init(void)
+{
+	int rv;
+
+#ifdef MBEDTLS_PSA_CRYPTO_C
+	rv = psa_crypto_init();
+	if (rv != 0) {
+		tls_log_err(
+		    "NNG-TLS-INIT", "Failed initializing PSA crypto", rv);
+		return (tls_mk_err(rv));
+	}
+#endif
+	// Uncomment the following to have noisy debug from mbedTLS.
+	// This may be useful when trying to debug failures.
+	// mbedtls_debug_set_threshold(9);
+
+	mbedtls_ssl_cookie_init(&mbed_ssl_cookie_ctx);
+	rv = mbedtls_ssl_cookie_setup(&mbed_ssl_cookie_ctx, tls_random, NULL);
+	if (rv != 0) {
+		tls_log_err("NNG_TLS_INIT",
+		    "Failed initializing SSL cookie system", rv);
+		return (tls_mk_err(rv));
+	}
+	return (NNG_OK);
+}
+
+static void
+tls_engine_fini(void)
+{
+	mbedtls_ssl_cookie_free(&mbed_ssl_cookie_ctx);
+#ifdef MBEDTLS_PSA_CRYPTO_C
+	mbedtls_psa_crypto_free();
+#endif
+}
+
+static bool
+fips_mode(void)
+{
+	return (false);
+}
+
 static nng_tls_engine_config_ops config_ops = {
 	.init     = config_init,
 	.fini     = config_fini,
@@ -804,68 +828,13 @@ static nng_tls_engine_conn_ops conn_ops = {
 	.peer_alt_names = conn_peer_alt_names,
 };
 
-static nng_tls_engine tls_engine_mbed = {
+nng_tls_engine nng_tls_engine_ops = {
 	.version     = NNG_TLS_ENGINE_VERSION,
 	.config_ops  = &config_ops,
 	.conn_ops    = &conn_ops,
 	.name        = "mbed",
 	.description = MBEDTLS_VERSION_STRING_FULL,
-	.fips_mode   = false,
+	.init        = tls_engine_init,
+	.fini        = tls_engine_fini,
+	.fips_mode   = fips_mode,
 };
-
-int
-nng_tls_engine_init_mbed(void)
-{
-	int rv;
-
-#ifdef NNG_TLS_USE_CTR_DRBG
-	nni_mtx_init(&rng_lock);
-
-	mbedtls_ctr_drbg_init(&cfg->rng_ctx);
-	rv = mbedtls_ctr_drbg_seed(&rng_ctx, tls_get_entropy, NULL, NULL, 0);
-	if (rv != 0) {
-		tls_log_err("NNG-TLS-RNG", "Failed initializing CTR DRBG", rv);
-		nni_mtx_fini(&rng_lock);
-		return (rv);
-	}
-#endif
-#ifdef MBEDTLS_PSA_CRYPTO_C
-	rv = psa_crypto_init();
-	if (rv != 0) {
-		tls_log_err(
-		    "NNG-TLS-INIT", "Failed initializing PSA crypto", rv);
-		return (rv);
-	}
-#endif
-	// Uncomment the following to have noisy debug from mbedTLS.
-	// This may be useful when trying to debug failures.
-	// mbedtls_debug_set_threshold(9);
-
-	mbedtls_ssl_cookie_init(&mbed_ssl_cookie_ctx);
-	rv = mbedtls_ssl_cookie_setup(&mbed_ssl_cookie_ctx, tls_random, NULL);
-
-	if (rv == 0) {
-		rv = nng_tls_engine_register(&tls_engine_mbed);
-	}
-
-#ifdef NNG_TLS_USE_CTR_DRBG
-	if (rv != 0) {
-		nni_mtx_fini(&rng_lock);
-	}
-#endif
-
-	return (rv);
-}
-
-void
-nng_tls_engine_fini_mbed(void)
-{
-	mbedtls_ssl_cookie_free(&mbed_ssl_cookie_ctx);
-#ifdef NNG_TLS_USE_CTR_DRBG
-	mbedtls_ctr_drbg_free(&rng_ctx);
-	nni_mtx_fini(&rng_lock);
-#endif
-#ifdef MBEDTLS_PSA_CRYPTO_C
-	mbedtls_psa_crypto_free();
-#endif
-}

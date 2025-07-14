@@ -206,8 +206,8 @@ dtls_bio_cancel(nng_aio *aio, void *arg, nng_err rv)
 	nni_mtx_lock(&p->lower_mtx);
 	if (nni_aio_list_active(aio)) {
 		nni_aio_list_remove(aio);
+		nni_aio_finish_error(aio, rv);
 	}
-	nni_aio_finish_error(aio, rv);
 	nni_mtx_unlock(&p->lower_mtx);
 }
 
@@ -1077,6 +1077,9 @@ dtls_ep_fini(void *arg)
 {
 	dtls_ep *ep = arg;
 
+	if (ep->tlscfg != NULL) {
+		nng_tls_config_free(ep->tlscfg);
+	}
 	nni_aio_fini(&ep->timeaio);
 	nni_aio_fini(&ep->resaio);
 	nni_aio_fini(&ep->tx_aio);
@@ -1578,7 +1581,12 @@ dtls_ep_set_tls(void *arg, nng_tls_config *cfg)
 		nni_mtx_unlock(&ep->mtx);
 		return (NNG_EBUSY);
 	}
-	ep->tlscfg = cfg;
+	nng_tls_config *old = ep->tlscfg;
+	ep->tlscfg          = cfg;
+	nng_tls_config_hold(cfg);
+	if (old != NULL) {
+		nng_tls_config_free(old);
+	}
 	nni_mtx_unlock(&ep->mtx);
 	return (NNG_OK);
 }

@@ -24,29 +24,42 @@
         <link rel="stylesheet" href="../fonts/fonts.css">
 
         <!-- Highlight.js Stylesheets -->
-        <link rel="stylesheet" href="../highlight.css">
-        <link rel="stylesheet" href="../tomorrow-night.css">
-        <link rel="stylesheet" href="../ayu-highlight.css">
+        <link rel="stylesheet" id="highlight-css" href="../highlight.css">
+        <link rel="stylesheet" id="tomorrow-night-css" href="../tomorrow-night.css">
+        <link rel="stylesheet" id="ayu-highlight-css" href="../ayu-highlight.css">
 
         <!-- Custom theme stylesheets -->
         <link rel="stylesheet" href="../theme/pagetoc.css">
 
 
-        <!-- Provide site root to javascript -->
+        <!-- Provide site root and default themes to javascript -->
         <script>
-            var path_to_root = "../";
-            var default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "navy" : "light";
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc.js"></script>
     </head>
     <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
     <div id="body-container">
         <!-- Work around some values being stored in localStorage wrapped in quotes -->
         <script>
             try {
-                var theme = localStorage.getItem('mdbook-theme');
-                var sidebar = localStorage.getItem('mdbook-sidebar');
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
 
                 if (theme.startsWith('"') && theme.endsWith('"')) {
                     localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
@@ -60,7 +73,8 @@
 
         <!-- Set the theme before any content is loaded, prevents flash -->
         <script>
-            var theme;
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
             try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
             if (theme === null || theme === undefined) { theme = default_theme; }
             const html = document.documentElement;
@@ -73,17 +87,20 @@
 
         <!-- Hide / unhide sidebar before it is displayed -->
         <script>
-            var sidebar = null;
-            var sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("sidebar-toggle-anchor");
             if (document.body.clientWidth >= 1080) {
                 try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
                 sidebar = sidebar || 'visible';
             } else {
                 sidebar = 'hidden';
+                sidebar_toggle.checked = false;
             }
-            sidebar_toggle.checked = sidebar === 'visible';
-            html.classList.remove('sidebar-visible');
-            html.classList.add("sidebar-" + sidebar);
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
         </script>
 
         <nav id="sidebar" class="sidebar" aria-label="Table of contents">
@@ -110,13 +127,14 @@
                             <i class="fa fa-paint-brush"></i>
                         </button>
                         <ul id="theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="default_theme">Auto</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="light">Light</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="rust">Rust</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="coal">Coal</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="navy">Navy</button></li>
                             <li role="none"><button role="menuitem" class="theme" id="ayu">Ayu</button></li>
                         </ul>
-                        <button id="search-toggle" class="icon-button" type="button" title="Search. (Shortkey: s)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="S" aria-controls="searchbar">
+                        <button id="search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="searchbar">
                             <i class="fa fa-search"></i>
                         </button>
                     </div>
@@ -133,7 +151,12 @@
 
                 <div id="search-wrapper" class="hidden">
                     <form id="searchbar-outer" class="searchbar-outer">
-                        <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                        <div class="search-wrapper">
+                            <input type="search" id="searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <i class="fa fa-spinner fa-spin"></i>
+                            </div>
+                        </div>
                     </form>
                     <div id="searchresults-outer" class="searchresults-outer hidden">
                         <div id="searchresults-header" class="searchresults-header"></div>
@@ -222,7 +245,7 @@
 </style>
 <h1 id="initialization--finalization"><a class="header" href="#initialization--finalization">Initialization &amp; Finalization</a></h1>
 <p>This chapter details the function used to initialize
-the library before first use, and the funtion used to
+the library before first use, and the function used to
 finalize the library and deallocate any resources used by the library.</p>
 <h2 id="initialization"><a class="header" href="#initialization">Initialization</a></h2>
 <pre><code class="language-c">typedef struct {
@@ -235,7 +258,7 @@ finalize the library and deallocate any resources used by the library.</p>
     int16_t num_resolver_threads;
 } nng_init_params;
 
-extern nng_err nng_init(nng_init_parms *params);
+extern nng_err nng_init(nng_init_params *params);
 </code></pre>
 <p>Before using other interfaces in this library, it is necessary to initialize
 the library. The <a name="a001"></a><code>nng_init</code> function performs this initialization.</p>
@@ -267,7 +290,7 @@ will be used instead for that value.</p>
 <p><code>num_task_threads</code> and <code>max_task_threads</code> <br />
 Configures the number of threads to use for tasks, which are used principally for completion
 callbacks. The maximum value can be used to provide an upper limit while still allowing
-for a dynamically calculated value to be used, as long as it does not exceeed the maximum.</p>
+for a dynamically calculated value to be used, as long as it does not exceed the maximum.</p>
 </li>
 <li>
 <p><code>num_expire_threads</code> and <code>max_expire_threads</code> <br />
@@ -285,9 +308,9 @@ Changes the number of threads used for asynchronous DNS look ups.</p>
 </li>
 </ul>
 <h2 id="finalization"><a class="header" href="#finalization">Finalization</a></h2>
-<pre><code class="language-c">extern void nng_init(nng_init_parms *params);
+<pre><code class="language-c">extern void nng_fini(void);
 </code></pre>
-<p>When the consumer is ready to deallocate any resoures allocated by the library, it should call
+<p>When the consumer is ready to deallocate any resources allocated by the library, it should call
 the <a name="a002"></a><code>nng_fini</code> function. Each call to <code>nng_fini</code> should be paired with an earlier call to
 <a href="/api/init.html#initialization"><code>nng_init</code></a>.</p>
 <p>After calling <code>nng_fini</code>, the consuming application must not make any other calls to NNG functions,
@@ -346,6 +369,7 @@ except that it may use <code>nng_init</code> to initialize the application for f
 
         <!-- Custom JS scripts -->
         <script src="../theme/pagetoc.js"></script>
+
 
 
     </div>

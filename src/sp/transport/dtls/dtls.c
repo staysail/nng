@@ -545,7 +545,7 @@ dtls_pipe_recv_tls(dtls_pipe *p)
 	nng_aio *aio = nni_list_first(&p->recv_aios);
 	size_t   len;
 	nng_msg *msg;
-	int      rv;
+	nng_err  rv;
 
 	if (aio == NULL) {
 		return;
@@ -942,11 +942,11 @@ dtls_rx_cb(void *arg)
 	dtls_ep   *ep = arg;
 	dtls_pipe *p;
 	nni_aio   *aio = &ep->rx_aio;
-	int        rv;
+	nng_err    rv;
 	nni_msg   *msg;
 
 	nni_mtx_lock(&ep->mtx);
-	if ((rv = nni_aio_result(aio)) != 0) {
+	if ((rv = nni_aio_result(aio)) != NNG_OK) {
 		// something bad happened on RX... which is unexpected.
 		// sleep a little bit and hope for recovery.
 		switch (nni_aio_result(aio)) {
@@ -1066,10 +1066,8 @@ dtls_pipe_getopt(
     void *arg, const char *name, void *buf, size_t *szp, nni_type t)
 {
 	dtls_pipe *p = arg;
-	int        rv;
 
-	rv = nni_getopt(dtls_pipe_options, name, p, buf, szp, t);
-	return (rv);
+	return (nni_getopt(dtls_pipe_options, name, p, buf, szp, t));
 }
 
 static void
@@ -1136,7 +1134,8 @@ dtls_ep_stop(void *arg)
 	nni_aio_stop(&ep->timeaio);
 
 	nni_mtx_lock(&ep->mtx);
-	ep->fini = true;
+	ep->fini    = true;
+	ep->started = false;
 	nni_mtx_unlock(&ep->mtx);
 }
 
@@ -1147,7 +1146,7 @@ dtls_timer_cb(void *arg)
 {
 	dtls_ep   *ep = arg;
 	dtls_pipe *p;
-	int        rv;
+	nng_err    rv;
 
 	nni_mtx_lock(&ep->mtx);
 	rv = nni_aio_result(&ep->timeaio);
@@ -1374,7 +1373,7 @@ dtls_resolv_cb(void *arg)
 	dtls_ep   *ep = arg;
 	dtls_pipe *p;
 	nni_aio   *aio;
-	int        rv;
+	nng_err    rv;
 
 	nni_mtx_lock(&ep->mtx);
 	if ((aio = nni_list_first(&ep->connaios)) == NULL) {
@@ -1387,7 +1386,7 @@ dtls_resolv_cb(void *arg)
 		nni_mtx_unlock(&ep->mtx);
 		return;
 	}
-	if ((rv = nni_aio_result(&ep->resaio)) != 0) {
+	if ((rv = nni_aio_result(&ep->resaio)) != NNG_OK) {
 		nni_aio_list_remove(aio);
 		nni_aio_finish_error(aio, rv);
 		nni_mtx_unlock(&ep->mtx);
@@ -1442,18 +1441,21 @@ dtls_ep_connect(void *arg, nni_aio *aio)
 		nni_mtx_unlock(&ep->mtx);
 		return;
 	}
-	if (ep->started) {
+	if (!nni_list_empty(&ep->connaios)) {
 		nni_aio_finish_error(aio, NNG_EBUSY);
 		nni_mtx_unlock(&ep->mtx);
 		return;
 	}
-	NNI_ASSERT(nni_list_empty(&ep->connaios));
 	ep->dialer = true;
-
+	NNI_ASSERT(nni_list_empty(&ep->connaios));
 	nni_list_append(&ep->connaios, aio);
 
-	// lookup the IP address
+	if (ep->started) {
+		nni_mtx_unlock(&ep->mtx);
+		return;
+	}
 
+	// lookup the IP address
 	memset(&ep->resolv, 0, sizeof(ep->resolv));
 	ep->resolv.ri_family  = ep->af;
 	ep->resolv.ri_host    = ep->url->u_hostname;

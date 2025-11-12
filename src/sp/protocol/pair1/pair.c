@@ -8,9 +8,16 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/list.h"
+#include "../../../core/lmq.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/platform.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 // Pair protocol.  The PAIRv1 protocol is a simple 1:1 messaging pattern.
 
@@ -786,7 +793,6 @@ static nni_proto_sock_ops pair1_sock_ops = {
 };
 
 static nni_proto pair1_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { PAIR1_SELF, PAIR1_SELF_NAME },
 	.proto_peer     = { PAIR1_PEER, PAIR1_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,
@@ -814,7 +820,6 @@ static nni_proto_sock_ops pair1_sock_ops_raw = {
 };
 
 static nni_proto pair1_proto_raw = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { PAIR1_SELF, PAIR1_SELF_NAME },
 	.proto_peer     = { PAIR1_PEER, PAIR1_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV | NNI_PROTO_FLAG_RAW,

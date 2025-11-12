@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -10,7 +10,13 @@
 
 #include <stdlib.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/message.h"
+#include "../../../core/msgqueue.h"
+#include "../../../core/pipe.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 // Subscriber protocol.  The SUB protocol receives messages sent to
 // it from publishers, and filters out those it is not interested in,
@@ -197,7 +203,6 @@ static nni_proto_sock_ops xsub0_sock_ops = {
 };
 
 static nni_proto xsub0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_SUB_V0, "sub" },
 	.proto_peer     = { NNI_PROTO_PUB_V0, "pub" },
 	.proto_flags    = NNI_PROTO_FLAG_RCV | NNI_PROTO_FLAG_RAW,

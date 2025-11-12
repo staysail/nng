@@ -12,8 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
-#include "nng/nng.h"
+#include "../../../core/nng_impl.h"
 
 // TCP transport.   Platform specific TCP operations must be
 // supplied as well.
@@ -338,14 +337,9 @@ tcptran_pipe_recv_cb(void *arg)
 		// Make sure the message payload is not too big.  If it is
 		// the caller will shut down the pipe.
 		if ((len > p->rcvmax) && (p->rcvmax > 0)) {
-			nng_sockaddr_storage ss;
-			nng_sockaddr        *sa = (nng_sockaddr *) &ss;
-			char                 peername[64] = "unknown";
-			if ((rv = nng_stream_get_addr(
-			         p->conn, NNG_OPT_REMADDR, sa)) == 0) {
-				(void) nng_str_sockaddr(
-				    sa, peername, sizeof(peername));
-			}
+			char peername[NNG_MAXADDRSTRLEN];
+			(void) nng_str_sockaddr(nng_stream_peer_addr(p->conn),
+			    peername, sizeof(peername));
 			nng_log_warn("NNG-RCVMAX",
 			    "Oversize message of %lu bytes (> %lu) "
 			    "on socket<%u> pipe<%u> from TCP %s",
@@ -565,6 +559,20 @@ tcptran_pipe_peer(void *arg)
 	tcptran_pipe *p = arg;
 
 	return (p->peer);
+}
+
+static const nng_sockaddr *
+tcptran_pipe_peer_addr(void *arg)
+{
+	tcptran_pipe *p = arg;
+	return (nng_stream_peer_addr(p->conn));
+}
+
+static const nng_sockaddr *
+tcptran_pipe_self_addr(void *arg)
+{
+	tcptran_pipe *p = arg;
+	return (nng_stream_self_addr(p->conn));
 }
 
 static nng_err
@@ -925,7 +933,7 @@ tcptran_ep_bind(void *arg, nng_url *url)
 	if (rv == NNG_OK) {
 		int port;
 		nng_stream_listener_get_int(
-		    ep->listener, NNG_OPT_TCP_BOUND_PORT, &port);
+		    ep->listener, NNG_OPT_BOUND_PORT, &port);
 		url->u_port = (uint32_t) port;
 	}
 	nni_mtx_unlock(&ep->mtx);
@@ -971,15 +979,17 @@ tcptran_pipe_size(void)
 }
 
 static nni_sp_pipe_ops tcptran_pipe_ops = {
-	.p_size   = tcptran_pipe_size,
-	.p_init   = tcptran_pipe_init,
-	.p_fini   = tcptran_pipe_fini,
-	.p_stop   = tcptran_pipe_stop,
-	.p_send   = tcptran_pipe_send,
-	.p_recv   = tcptran_pipe_recv,
-	.p_close  = tcptran_pipe_close,
-	.p_peer   = tcptran_pipe_peer,
-	.p_getopt = tcptran_pipe_getopt,
+	.p_size      = tcptran_pipe_size,
+	.p_init      = tcptran_pipe_init,
+	.p_fini      = tcptran_pipe_fini,
+	.p_stop      = tcptran_pipe_stop,
+	.p_send      = tcptran_pipe_send,
+	.p_recv      = tcptran_pipe_recv,
+	.p_close     = tcptran_pipe_close,
+	.p_peer      = tcptran_pipe_peer,
+	.p_peer_addr = tcptran_pipe_peer_addr,
+	.p_self_addr = tcptran_pipe_self_addr,
+	.p_getopt    = tcptran_pipe_getopt,
 };
 
 static const nni_option tcptran_ep_opts[] = {

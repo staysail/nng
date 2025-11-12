@@ -13,11 +13,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
-#include "nng/http.h"
-#include "supplemental/http/http_api.h"
+#include "../../core/aio.h"
+#include "../../core/defs.h"
+#include "../../core/message.h"
+#include "../../core/options.h"
+#include "../../core/platform.h"
+#include "../../core/reap.h"
+#include "../../core/stream.h"
+#include "../../core/strs.h"
+#include "../../core/url.h"
+#include "../../supplemental/http/http_api.h"
 
 #include "base64.h"
+#include "nng/nng.h"
 #include "sha1.h"
 #include "websocket.h"
 
@@ -85,6 +93,11 @@ struct nni_ws {
 		nni_http_header wsproto;
 		nni_http_header wsversion;
 	} hdrs;
+
+	// these fields are for header iteration
+	const char *curhdrkey;
+	const char *curhdrval;
+	void       *nexthdr;
 };
 
 struct nni_ws_listener {
@@ -186,6 +199,9 @@ static void    ws_str_close(void *);
 static void    ws_str_send(void *, nng_aio *);
 static void    ws_str_recv(void *, nng_aio *);
 static nng_err ws_str_get(void *, const char *, void *, size_t *, nni_type);
+static nng_err ws_str_peer_cert(void *, nng_tls_cert **);
+static const nng_sockaddr *ws_str_self_addr(void *);
+static const nng_sockaddr *ws_str_peer_addr(void *);
 
 static void ws_listener_close(void *);
 static void ws_listener_free(void *);
@@ -1388,12 +1404,15 @@ ws_init(nni_ws **wsp)
 	nni_aio_set_timeout(&ws->closeaio, 100);
 	nni_aio_set_timeout(&ws->httpaio, 2000);
 
-	ws->ops.s_close = ws_str_close;
-	ws->ops.s_free  = ws_str_free;
-	ws->ops.s_stop  = ws_stop;
-	ws->ops.s_send  = ws_str_send;
-	ws->ops.s_recv  = ws_str_recv;
-	ws->ops.s_get   = ws_str_get;
+	ws->ops.s_close     = ws_str_close;
+	ws->ops.s_free      = ws_str_free;
+	ws->ops.s_stop      = ws_stop;
+	ws->ops.s_send      = ws_str_send;
+	ws->ops.s_recv      = ws_str_recv;
+	ws->ops.s_get       = ws_str_get;
+	ws->ops.s_peer_cert = ws_str_peer_cert;
+	ws->ops.s_peer_addr = ws_str_peer_addr;
+	ws->ops.s_self_addr = ws_str_self_addr;
 
 	ws->fragsize = 1 << 20; // we won't send a frame larger than this
 	*wsp         = ws;
@@ -2700,6 +2719,60 @@ ws_get_send_text(void *arg, void *buf, size_t *szp, nni_type t)
 	return (nni_copyout_bool(b, buf, szp, t));
 }
 
+static nng_err
+ws_get_next_header(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws *ws = arg;
+	bool    b;
+
+	if (t != NNI_TYPE_BOOL) {
+		return (NNG_EBADTYPE);
+	}
+	nni_mtx_lock(&ws->mtx);
+	b = nng_http_next_header(
+	    ws->http, &ws->curhdrkey, &ws->curhdrval, &ws->nexthdr);
+	nni_mtx_unlock(&ws->mtx);
+	return (nni_copyout_bool(b, buf, szp, t));
+}
+
+static nng_err
+ws_get_reset_header(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws *ws = arg;
+
+	if (t != NNI_TYPE_BOOL) {
+		return (NNG_EBADTYPE);
+	}
+	nni_mtx_lock(&ws->mtx);
+	ws->nexthdr = NULL;
+	nni_mtx_unlock(&ws->mtx);
+	return (nni_copyout_bool(true, buf, szp, t));
+}
+
+static nng_err
+ws_get_header_key(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws     *ws = arg;
+	const char *s;
+
+	nni_mtx_lock(&ws->mtx);
+	s = ws->curhdrkey;
+	nni_mtx_unlock(&ws->mtx);
+	return (nni_copyout_str(s, buf, szp, t));
+}
+
+static nng_err
+ws_get_header_val(void *arg, void *buf, size_t *szp, nni_type t)
+{
+	nni_ws     *ws = arg;
+	const char *s;
+
+	nni_mtx_lock(&ws->mtx);
+	s = ws->curhdrval;
+	nni_mtx_unlock(&ws->mtx);
+	return (nni_copyout_str(s, buf, szp, t));
+}
+
 static const nni_option ws_options[] = {
 	{
 	    .o_name = NNG_OPT_WS_REQUEST_URI,
@@ -2714,21 +2787,25 @@ static const nni_option ws_options[] = {
 	    .o_get  = ws_get_send_text,
 	},
 	{
+	    .o_name = NNG_OPT_WS_HEADER_NEXT,
+	    .o_get  = ws_get_next_header,
+	},
+	{
+	    .o_name = NNG_OPT_WS_HEADER_RESET,
+	    .o_get  = ws_get_reset_header,
+	},
+	{
+	    .o_name = NNG_OPT_WS_HEADER_KEY,
+	    .o_get  = ws_get_header_key,
+	},
+	{
+	    .o_name = NNG_OPT_WS_HEADER_VALUE,
+	    .o_get  = ws_get_header_val,
+	},
+	{
 	    .o_name = NULL,
 	},
 };
-
-static nng_err
-ws_get_header(nni_ws *ws, const char *nm, void *buf, size_t *szp, nni_type t)
-{
-	const char *s;
-	nm += strlen(NNG_OPT_WS_HEADER);
-	s = nni_http_get_header(ws->http, nm);
-	if (s == NULL) {
-		return (NNG_ENOENT);
-	}
-	return (nni_copyout_str(s, buf, szp, t));
-}
 
 static nng_err
 ws_str_get(void *arg, const char *nm, void *buf, size_t *szp, nni_type t)
@@ -2748,9 +2825,44 @@ ws_str_get(void *arg, const char *nm, void *buf, size_t *szp, nni_type t)
 	}
 	// Check for generic headers...
 	if (rv == NNG_ENOTSUP) {
+		const char *val;
+
 		if (startswith(nm, NNG_OPT_WS_HEADER)) {
-			rv = ws_get_header(ws, nm, buf, szp, t);
+			val = nng_http_get_header(
+			    ws->http, nm + strlen(NNG_OPT_WS_HEADER));
+			if (val == NULL) {
+				return (NNG_ENOENT);
+			}
+			return (nni_copyout_str(val, buf, szp, t));
 		}
 	}
 	return (rv);
+}
+
+static nng_err
+ws_str_peer_cert(void *arg, nng_tls_cert **certp)
+{
+	nni_ws *ws = arg;
+
+	nni_mtx_lock(&ws->mtx);
+	if (ws->closed) {
+		nni_mtx_unlock(&ws->mtx);
+		return (NNG_ECLOSED);
+	}
+	nni_mtx_unlock(&ws->mtx);
+	return (nni_http_conn_peer_cert(ws->http, certp));
+}
+
+static const nng_sockaddr *
+ws_str_peer_addr(void *arg)
+{
+	nni_ws *ws = arg;
+	return (nni_http_peer_addr(ws->http));
+}
+
+static const nng_sockaddr *
+ws_str_self_addr(void *arg)
+{
+	nni_ws *ws = arg;
+	return (nni_http_self_addr(ws->http));
 }

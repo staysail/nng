@@ -84,6 +84,16 @@ either [`nng_dialer_id`] or [`nng_listener_id`] for the returned object will ret
 > The socket, or the endpoint, returned by these functions may be in the process of closing,
 > and might not be further usable as a result. (Other functions will result in [`NNG_ECLOSED`].)
 
+## Pipe Socket Addresses
+
+```c
+nng_err nng_pipe_peer_addr(nng_pipe p, nng_sockaddr *sap);
+nng_err nng_pipe_self_addr(nng_pipe p, nng_sockaddr *sap);
+```
+
+The [`nng_sockaddr`] for the local (self) or remote (peer) of the pipe is available using these
+functions. The associated address will be stored in the location pointed to by _sap_.
+
 ## Pipe Options
 
 ```c
@@ -91,24 +101,37 @@ nng_err nng_pipe_get_bool(nng_pipe p, const char *opt, bool *valp);
 nng_err nng_pipe_get_int(nng_pipe p, const char *opt, int *valp);
 nng_err nng_pipe_get_ms(nng_pipe p, const char *opt, nng_duration *valp);
 nng_err nng_pipe_get_size(nng_pipe p, const char *opt, size_t *valp);
-nng_err nng_pipe_get_addr(nng_pipe p, const char *opt, nng_sockaddr *valp);
-nng_err nng_pipe_get_string(nng_pipe p, const char *opt, char **valp);
+nng_err nng_pipe_get_string(nng_pipe p, const char *opt, const char **valp);
+nng_err nng_pipe_get_strcpy(nng_pipe p, const char *opt, char *val, size_t len);
+nng_err nng_pipe_get_strdup(nng_pipe p, const char *opt, char **valp);
+nng_err nng_pipe_get_strlen(nng_pipe p, const char *opt, size_t *lenp);
 ```
 
 {{hi:`nng_pipe_get_bool`}}
 {{hi:`nng_pipe_get_int`}}
 {{hi:`nng_pipe_get_ms`}}
 {{hi:`nng_pipe_get_size`}}
-{{hi:`nng_pipe_get_addr`}}
 {{hi:`nng_pipe_get_string`}}
+{{hi:`nng_pipe_get_strcpy`}}
+{{hi:`nng_pipe_get_strdup`}}
 These functions are used to obtain value of an option named _opt_ from the pipe _p_, and store it in the location
 referenced by _valp_.
 
 These functions access an option as a specific type. The transport layer will have details about which options
 are available, and which type they may be accessed using.
 
-In the case of `nng_pipe_get_string`, the string is created as if by [`nng_strdup`], and must be freed by
-the caller using [`nng_strfree`] when no longer needed.
+In the case of `nng_pipe_get_string`, the underlying string may only be valid for as long as the pipe is valid.
+Thus, this function can only be safely called in a pipe event callback set up with [`nng_pipe_notify`].
+
+The `nng_pipe_get_strdup` function is like `nng_pipe_get_string`, but makes a copy into a newly allocated buffer, so that the string must be freed by the caller using [`nng_strfree`].
+
+The `nng_pipe_get_strcpy` function is also like `nng_pipe_get_string`, but it makes a copy into a buffer
+supplied by the caller. The buffer is passed in _val_, and the size of the buffer is passed in _len_.
+The value of _len_ must be large enough to hold the string and the terminating zero byte.
+
+The `nng_pipe_get_strlen` function is used to obtain the length of the string. This can be useful
+to find the size of the buffer needed by the `nng_pipe_get_strcpy` function for a property.
+Note that like `strlen`, this size does not account for the zero byte to terminate the string.
 
 ## Pipe Notifications
 

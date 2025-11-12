@@ -12,9 +12,7 @@
 #ifndef NNG_SUPPLEMENTAL_WEBSOCKET_WEBSOCKET_H
 #define NNG_SUPPLEMENTAL_WEBSOCKET_WEBSOCKET_H
 
-#include <stdbool.h>
-
-#include "core/stream.h"
+#include "../../core/stream.h"
 
 typedef struct nni_ws          nni_ws;
 typedef struct nni_ws_listener nni_ws_listener;

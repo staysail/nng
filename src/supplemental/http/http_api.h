@@ -12,10 +12,9 @@
 #ifndef NNG_SUPPLEMENTAL_HTTP_HTTP_API_H
 #define NNG_SUPPLEMENTAL_HTTP_HTTP_API_H
 
-#include "core/nng_impl.h"
-#include "nng/http.h"
-
+#include "../../core/defs.h"
 #include "http_msg.h"
+#include "nng/http.h"
 
 // This represents the "internal" HTTP API.  It should not be used
 // or exposed to applications directly.
@@ -68,10 +67,13 @@ extern nng_err nni_http_chunks_parse(
     nni_http_chunks *, void *, size_t, size_t *);
 
 extern void nni_http_read_chunks(
-    nni_http_conn *, nni_http_chunks *, nni_aio *);
+    nni_http_conn *, nni_http_chunks *, nng_aio *);
 
 extern nni_http_req *nni_http_conn_req(nni_http_conn *);
 extern nni_http_res *nni_http_conn_res(nni_http_conn *);
+
+extern const nng_sockaddr *nni_http_peer_addr(nni_http_conn *);
+extern const nng_sockaddr *nni_http_self_addr(nni_http_conn *);
 
 // Private to the server. (Used to support session hijacking.)
 extern void  nni_http_conn_set_ctx(nni_http_conn *, void *);
@@ -100,32 +102,35 @@ extern void nni_http_conn_close(nng_http *);
 extern void nni_http_conn_fini(nni_http_conn *);
 extern int  nni_http_conn_getopt(
      nng_http *, const char *, void *, size_t *, nni_type);
+extern nng_err nni_http_conn_peer_cert(nng_http *, nng_tls_cert **);
 
 // Reading messages -- the caller must supply a preinitialized (but otherwise
 // idle) message.  We recommend the caller store this in the aio's user data.
 // Note that the iovs of the aio's are clobbered by these methods -- callers
 // must not use them for any other purpose.
 
-extern void nni_http_write_req(nni_http_conn *, nni_aio *);
-extern void nni_http_read_res(nni_http_conn *, nni_aio *);
-extern void nni_http_read_req(nni_http_conn *, nni_aio *);
-extern void nni_http_write_res(nni_http_conn *, nni_aio *);
-extern void nni_http_read_discard(nni_http_conn *, size_t, nni_aio *);
+extern void nni_http_write_req(nni_http_conn *, nng_aio *);
+extern void nni_http_read_res(nni_http_conn *, nng_aio *);
+extern void nni_http_read_req(nni_http_conn *, nng_aio *);
+extern void nni_http_write_res(nni_http_conn *, nng_aio *);
+extern void nni_http_read_discard(nni_http_conn *, size_t, nng_aio *);
 
 extern nng_err nni_http_req_alloc_data(nni_http_req *, size_t);
 extern nng_err nni_http_res_alloc_data(nni_http_res *, size_t);
 
 extern bool nni_http_is_error(nng_http *);
 
-extern void nni_http_read(nni_http_conn *, nni_aio *);
-extern void nni_http_read_full(nni_http_conn *, nni_aio *);
-extern void nni_http_write(nni_http_conn *, nni_aio *);
-extern void nni_http_write_full(nni_http_conn *, nni_aio *);
+extern void nni_http_read(nni_http_conn *, nng_aio *);
+extern void nni_http_read_full(nni_http_conn *, nng_aio *);
+extern void nni_http_write(nni_http_conn *, nng_aio *);
+extern void nni_http_write_full(nni_http_conn *, nng_aio *);
 
 extern nng_err     nni_http_add_header(nng_http *, const char *, const char *);
 extern nng_err     nni_http_set_header(nng_http *, const char *, const char *);
 extern void        nni_http_del_header(nng_http *, const char *);
 extern const char *nni_http_get_header(nng_http *, const char *);
+extern bool        nni_http_next_header(
+           nng_http *, const char **, const char **, void **);
 
 extern void    nni_http_get_body(nng_http *, void **, size_t *);
 extern void    nni_http_set_body(nng_http *, void *, size_t);
@@ -324,7 +329,7 @@ extern int nni_http_client_set(
 extern int nni_http_client_get(
     nni_http_client *, const char *, void *, size_t *, nni_type);
 
-extern void nni_http_client_connect(nni_http_client *, nni_aio *);
+extern void nni_http_client_connect(nni_http_client *, nng_aio *);
 
 // nni_http_transact_conn is used to perform a round-trip exchange (i.e. a
 // single HTTP transaction).  It will not automatically close the connection,
@@ -333,14 +338,14 @@ extern void nni_http_client_connect(nni_http_client *, nni_aio *);
 // Note that this will fail with NNG_ENOTSUP if the server attempts to reply
 // with a chunked transfer encoding.  The request and response used are the
 // ones associated with the connection.
-extern void nni_http_transact_conn(nni_http_conn *, nni_aio *);
+extern void nni_http_transact_conn(nni_http_conn *, nng_aio *);
 
 // nni_http_transact is used to execute a single transaction to a server.
 // The connection is opened, and will be closed when the transaction is
 // complete.  Note that this will fail with NNG_ENOTSUP if the server attempts
 // to reply with a chunked transfer encoding.
 extern void nni_http_transact(
-    nni_http_client *, nni_http_req *, nni_http_res *, nni_aio *);
+    nni_http_client *, nni_http_req *, nni_http_res *, nng_aio *);
 
 // nni_http_stream_scheme returns the underlying stream scheme for a given
 // upper layer scheme.

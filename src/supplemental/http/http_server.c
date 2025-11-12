@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
+#include "../../core/nng_impl.h"
 
 #include "http_api.h"
 #include "http_msg.h"
@@ -871,7 +871,7 @@ http_server_start(nni_http_server *s)
 	if (s->port == 0) {
 		int port;
 		nng_stream_listener_get_int(
-		    s->listener, NNG_OPT_TCP_BOUND_PORT, &port);
+		    s->listener, NNG_OPT_BOUND_PORT, &port);
 		s->port = (uint32_t) port;
 	}
 	nng_stream_listener_accept(s->listener, &s->accaio);
@@ -1570,6 +1570,9 @@ nni_http_handler_init_static(nni_http_handler **hpp, const char *uri,
 
 	if ((hs = NNI_ALLOC_STRUCT(hs)) == NULL) {
 		return (NNG_ENOMEM);
+	}
+	if (ctype == NULL) {
+		ctype = "application/octet-stream";
 	}
 	if (((hs->ctype = nni_strdup(ctype)) == NULL) ||
 	    ((size > 0) && ((hs->data = nni_alloc(size)) == NULL))) {

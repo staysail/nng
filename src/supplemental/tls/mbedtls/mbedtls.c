@@ -14,31 +14,31 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "mbedtls/version.h" // Must be first in order to pick up version
-
-#include "mbedtls/error.h"
-#ifdef MBEDTLS_PSA_CRYPTO_C
-#include "psa/crypto.h"
-#endif
-
 #include "nng/nng.h"
 
-// We use a common cookie for our application.
-#include "mbedtls/ssl_cookie.h"
+#include "../../../core/nng_impl.h"
 
 #include "../tls_engine.h"
 
-// mbedTLS renamed this header for 2.4.0.
-#if MBEDTLS_VERSION_MAJOR > 2 || MBEDTLS_VERSION_MINOR >= 4
-#include "mbedtls/net_sockets.h"
-#else
-#include "mbedtls/net.h"
+#include <mbedtls/version.h> // Must be first in order to pick up version
+
+#include <mbedtls/error.h>
+#ifdef MBEDTLS_PSA_CRYPTO_C
+#include <psa/crypto.h>
 #endif
 
-#include "mbedtls/debug.h"
-#include "mbedtls/ssl.h"
+// We use a common cookie for our application.
+#include <mbedtls/ssl_cookie.h>
 
-#include "core/nng_impl.h"
+// mbedTLS renamed this header for 2.4.0.
+#if MBEDTLS_VERSION_MAJOR > 2 || MBEDTLS_VERSION_MINOR >= 4
+#include <mbedtls/net_sockets.h>
+#else
+#include <mbedtls/net.h>
+#endif
+
+#include <mbedtls/debug.h>
+#include <mbedtls/ssl.h>
 
 // pair holds a private key and the associated certificate.
 typedef struct {
@@ -75,6 +75,16 @@ psk_free(psk *p)
 		NNI_FREE_STRUCT(p);
 	}
 }
+
+struct nng_tls_engine_cert {
+	mbedtls_x509_crt crt;
+	char             subject[1024];
+	char             issuer[1024];
+	char             last_alt[256];
+	char             serial[64]; // 20 bytes per RFC, x 3 for display
+	char             cn[65];     // 64 + null
+	int              next_alt;
+};
 
 struct nng_tls_engine_conn {
 	void               *tls; // parent conn
@@ -201,8 +211,8 @@ tls_mk_err(int err)
 static int
 net_send(void *tls, const unsigned char *buf, size_t len)
 {
-	size_t sz = len;
-	int    rv;
+	size_t  sz = len;
+	nng_err rv;
 
 	rv = nng_tls_engine_send(tls, buf, &sz);
 	switch (rv) {
@@ -218,8 +228,8 @@ net_send(void *tls, const unsigned char *buf, size_t len)
 static int
 net_recv(void *tls, unsigned char *buf, size_t len)
 {
-	size_t sz = len;
-	int    rv;
+	size_t  sz = len;
+	nng_err rv;
 
 	rv = nng_tls_engine_recv(tls, buf, &sz);
 	switch (rv) {
@@ -370,11 +380,32 @@ conn_verified(nng_tls_engine_conn *ec)
 	return (mbedtls_ssl_get_verify_result(&ec->ctx) == 0);
 }
 
+static nng_err
+conn_peer_cert(nng_tls_engine_conn *ec, nng_tls_engine_cert **certp)
+{
+	nng_tls_engine_cert *cert;
+
+	const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&ec->ctx);
+
+	if (crt == NULL) {
+		return (NNG_ENOENT);
+	}
+	if ((cert = nni_zalloc(sizeof(*cert))) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	// In order to ensure that we get our *own* copy that might outlive the
+	// cert buffer from the connection, we do a parse.
+	mbedtls_x509_crt_parse(&cert->crt, crt->raw.p, crt->raw.len);
+
+	*certp = cert;
+	return (NNG_OK);
+}
+
 static char *
 conn_peer_cn(nng_tls_engine_conn *ec)
 {
 	const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&ec->ctx);
-	if (!crt) {
+	if (crt == NULL) {
 		return (NULL);
 	}
 
@@ -398,47 +429,6 @@ conn_peer_cn(nng_tls_engine_conn *ec)
 	char *rv = malloc(len);
 	memcpy(rv, pos, len);
 	return (rv);
-}
-
-static char **
-conn_peer_alt_names(nng_tls_engine_conn *ec)
-{
-	const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&ec->ctx);
-	if (!crt) {
-		return (NULL);
-	}
-
-	const mbedtls_asn1_sequence *seq = &crt->subject_alt_names;
-
-	// get count
-	int count = 0;
-	do {
-		if (seq->buf.len > 0)
-			++count;
-		seq = seq->next;
-	} while (seq);
-	if (count == 0)
-		return NULL;
-
-	seq = &crt->subject_alt_names;
-
-	// copy strings
-	char **rv = malloc((count + 1) * sizeof(char *));
-	int    i  = 0;
-	do {
-		if (seq->buf.len == 0)
-			continue;
-
-		rv[i] = malloc(seq->buf.len + 1);
-		memcpy(rv[i], seq->buf.p, seq->buf.len);
-		rv[i][seq->buf.len] = 0;
-		++i;
-
-		seq = seq->next;
-	} while (seq);
-	rv[i] = NULL;
-
-	return rv;
 }
 
 static void
@@ -713,6 +703,223 @@ err:
 	return (rv);
 }
 
+static void
+cert_fini(nng_tls_engine_cert *crt)
+{
+	mbedtls_x509_crt_free(&crt->crt);
+	nni_free(crt, sizeof(*crt));
+}
+
+static nng_err
+cert_parse_der(nng_tls_engine_cert **crtp, const uint8_t *der, size_t size)
+{
+	nng_tls_engine_cert *cert;
+	int                  rv;
+
+	if ((cert = nni_zalloc(sizeof(*cert))) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	mbedtls_x509_crt_init(&cert->crt);
+	if ((rv = mbedtls_x509_crt_parse_der(&cert->crt, der, size)) != 0) {
+		tls_log_err(
+		    "NNG-TLS-DER", "Failure parsing DER certificate", rv);
+		rv = tls_mk_err(rv);
+		cert_fini(cert);
+		return (rv);
+	}
+	*crtp = cert;
+	return (NNG_OK);
+}
+
+static nng_err
+cert_parse_pem(nng_tls_engine_cert **crtp, const char *pem, size_t size)
+{
+	nng_tls_engine_cert *cert;
+	int                  rv;
+
+	if ((cert = nni_zalloc(sizeof(*cert))) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	mbedtls_x509_crt_init(&cert->crt);
+	if ((rv = mbedtls_x509_crt_parse(
+	         &cert->crt, (const uint8_t *) pem, size)) != 0) {
+		tls_log_err(
+		    "NNG-TLS-PEM", "Failure parsing PEM certificate", rv);
+		rv = tls_mk_err(rv);
+		cert_fini(cert);
+		return (rv);
+	}
+	*crtp = cert;
+	return (NNG_OK);
+}
+
+static nng_err
+cert_get_der(nng_tls_engine_cert *crt, uint8_t *buf, size_t *sizep)
+{
+	if (*sizep < crt->crt.raw.len) {
+		*sizep = crt->crt.raw.len;
+		return (NNG_ENOSPC);
+	}
+	*sizep = crt->crt.raw.len;
+	memcpy(buf, crt->crt.raw.p, *sizep);
+	return (NNG_OK);
+}
+
+static nng_err
+cert_subject(nng_tls_engine_cert *crt, char **namep)
+{
+	if (crt->subject[0] != 0) {
+		*namep = (char *) &crt->subject[0];
+		return (NNG_OK);
+	}
+	int len = mbedtls_x509_dn_gets(
+	    crt->subject, sizeof(crt->subject), &crt->crt.subject);
+	if (len <= 0) {
+		return (NNG_ENOTSUP);
+	}
+	*namep = &crt->subject[0];
+	return (NNG_OK);
+}
+
+static nng_err
+cert_issuer(nng_tls_engine_cert *crt, char **namep)
+{
+	if (crt->issuer[0] != 0) {
+		*namep = (char *) &crt->issuer[0];
+		return (NNG_OK);
+	}
+	int len = mbedtls_x509_dn_gets(
+	    crt->issuer, sizeof(crt->issuer), &crt->crt.issuer);
+	if (len <= 0) {
+		return (NNG_ENOTSUP);
+	}
+	*namep = &crt->issuer[0];
+	return (NNG_OK);
+}
+
+static nng_err
+cert_serial(nng_tls_engine_cert *crt, char **namep)
+{
+	if (crt->serial[0] != 0) {
+		*namep = (char *) &crt->serial[0];
+		return (NNG_OK);
+	}
+	int len = mbedtls_x509_serial_gets(
+	    crt->serial, sizeof(crt->serial), &crt->crt.serial);
+	if (len < 0) {
+		return (tls_mk_err(len));
+	}
+	*namep = &crt->serial[0];
+	return (NNG_OK);
+}
+
+static nng_err
+cert_subject_cn(nng_tls_engine_cert *crt, char **namep)
+{
+	nng_err rv;
+	char   *subject;
+	char   *s;
+	if (crt->cn[0] != 0) {
+		*namep = (char *) &crt->cn[0];
+		return (NNG_OK);
+	}
+	if ((rv = cert_subject(crt, &subject)) != NNG_OK) {
+		return (rv);
+	}
+	if ((s = strstr(crt->subject, "CN=")) == NULL) {
+		return (NNG_ENOENT);
+	}
+	s += 3;
+	int  n   = 0;
+	bool esc = false;
+	while (n < 64) {
+		if (*s == 0) {
+			crt->cn[n++] = 0;
+			break;
+		}
+		if (esc) {
+			esc          = false;
+			crt->cn[n++] = *s++;
+		} else if (*s == '\\') {
+			esc = true;
+		} else if (*s == ',') {
+			crt->cn[n++] = 0;
+			break;
+		} else {
+			crt->cn[n++] = *s++;
+		}
+	}
+	if ((n == 0) || (n > 64)) {
+		nng_log_warn(
+		    "NNG-TLS-CN", "X.509 Subject CN length is invalid");
+		return (NNG_EINVAL);
+	}
+	*namep = (char *) &crt->cn[0];
+	return (0);
+}
+
+static nng_err
+cert_next_alt(nng_tls_engine_cert *crt, char **namep)
+{
+	const mbedtls_asn1_sequence *seq = &crt->crt.subject_alt_names;
+
+	// get count
+	int count = 0;
+	for (seq = &crt->crt.subject_alt_names; seq != NULL; seq = seq->next) {
+		if (seq->buf.len == 0) {
+			continue;
+		}
+		if (count == crt->next_alt) {
+			break;
+		}
+		count++;
+	}
+	if (seq == NULL) {
+		return (NNG_ENOENT);
+	}
+	crt->next_alt++;
+	if (seq->buf.len >= sizeof(crt->last_alt)) {
+		return (NNG_EINVAL);
+	}
+	memcpy(crt->last_alt, seq->buf.p, seq->buf.len);
+	crt->last_alt[seq->buf.len] = 0;
+	*namep                      = crt->last_alt;
+	return (NNG_OK);
+}
+
+static void
+mbed_time_to_tm(mbedtls_x509_time *mt, struct tm *tmp)
+{
+	memset(tmp, 0, sizeof(*tmp)); // also clears any zone offset, etc
+	if (mt->year < 100) {
+		// all dates > Y2K, relative to 1900
+		tmp->tm_year = mt->year + 100;
+	} else {
+		tmp->tm_year = mt->year - 1900;
+	}
+	tmp->tm_mon  = mt->mon - 1; // month is zero based
+	tmp->tm_mday = mt->day;
+	tmp->tm_hour = mt->hour;
+	tmp->tm_min  = mt->min;
+	tmp->tm_sec  = mt->sec;
+	// canonicalize the time
+	(void) mktime(tmp);
+}
+
+static nng_err
+cert_not_before(nng_tls_engine_cert *cert, struct tm *tmp)
+{
+	mbed_time_to_tm(&cert->crt.valid_from, tmp);
+	return (NNG_OK);
+}
+
+static nng_err
+cert_not_after(nng_tls_engine_cert *cert, struct tm *tmp)
+{
+	mbed_time_to_tm(&cert->crt.valid_to, tmp);
+	return (NNG_OK);
+}
+
 static int
 config_version(nng_tls_engine_config *cfg, nng_tls_version min_ver,
     nng_tls_version max_ver)
@@ -786,7 +993,7 @@ tls_engine_init(void)
 #endif
 	// Uncomment the following to have noisy debug from mbedTLS.
 	// This may be useful when trying to debug failures.
-	// mbedtls_debug_set_threshold(9);
+	mbedtls_debug_set_threshold(1);
 
 	mbedtls_ssl_cookie_init(&mbed_ssl_cookie_ctx);
 	rv = mbedtls_ssl_cookie_setup(&mbed_ssl_cookie_ctx, tls_random, NULL);
@@ -826,22 +1033,37 @@ static nng_tls_engine_config_ops config_ops = {
 };
 
 static nng_tls_engine_conn_ops conn_ops = {
-	.size           = sizeof(nng_tls_engine_conn),
-	.init           = conn_init,
-	.fini           = conn_fini,
-	.close          = conn_close,
-	.recv           = conn_recv,
-	.send           = conn_send,
-	.handshake      = conn_handshake,
-	.verified       = conn_verified,
-	.peer_cn        = conn_peer_cn,
-	.peer_alt_names = conn_peer_alt_names,
+	.size      = sizeof(nng_tls_engine_conn),
+	.init      = conn_init,
+	.fini      = conn_fini,
+	.close     = conn_close,
+	.recv      = conn_recv,
+	.send      = conn_send,
+	.handshake = conn_handshake,
+	.verified  = conn_verified,
+	.peer_cert = conn_peer_cert,
+	.peer_cn   = conn_peer_cn,
+};
+
+static nng_tls_engine_cert_ops cert_ops = {
+	.fini          = cert_fini,
+	.parse_der     = cert_parse_der,
+	.parse_pem     = cert_parse_pem,
+	.get_der       = cert_get_der,
+	.subject       = cert_subject,
+	.issuer        = cert_issuer,
+	.serial_number = cert_serial,
+	.subject_cn    = cert_subject_cn,
+	.next_alt_name = cert_next_alt,
+	.not_before    = cert_not_before,
+	.not_after     = cert_not_after,
 };
 
 nng_tls_engine nng_tls_engine_ops = {
 	.version     = NNG_TLS_ENGINE_VERSION,
 	.config_ops  = &config_ops,
 	.conn_ops    = &conn_ops,
+	.cert_ops    = &cert_ops,
 	.name        = "mbed",
 	.description = MBEDTLS_VERSION_STRING_FULL,
 	.init        = tls_engine_init,

@@ -12,8 +12,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
-
+#include "../../../core/nng_impl.h"
 #include "nng/nng.h"
 
 // TLS over TCP transport.   Platform specific TCP operations must be
@@ -43,9 +42,9 @@ struct tlstran_pipe {
 	size_t        gotrxhead;
 	size_t        wanttxhead;
 	size_t        wantrxhead;
-	nni_aio       txaio;
-	nni_aio       rxaio;
-	nni_aio       negoaio;
+	nng_aio       txaio;
+	nng_aio       rxaio;
+	nng_aio       negoaio;
 	nni_msg      *rxmsg;
 	nni_mtx       mtx;
 };
@@ -63,9 +62,9 @@ struct tlstran_ep {
 	nng_stream_listener *listener;
 	nni_dialer          *ndialer;
 	nni_listener        *nlistener;
-	nni_aio             *useraio;
-	nni_aio              connaio;
-	nni_aio              timeaio;
+	nng_aio             *useraio;
+	nng_aio              connaio;
+	nng_aio              timeaio;
 	nni_list             waitpipes; // pipes waiting to match to socket
 	nni_list             negopipes; // pipes busy negotiating
 	const char          *host;
@@ -145,6 +144,20 @@ tlstran_pipe_fini(void *arg)
 	nni_aio_fini(&p->negoaio);
 	nni_msg_free(p->rxmsg);
 	nni_mtx_fini(&p->mtx);
+}
+
+static const nng_sockaddr *
+tlstran_pipe_peer_addr(void *arg)
+{
+	tlstran_pipe *p = arg;
+	return (nng_stream_peer_addr(p->tls));
+}
+
+static const nng_sockaddr *
+tlstran_pipe_self_addr(void *arg)
+{
+	tlstran_pipe *p = arg;
+	return (nng_stream_self_addr(p->tls));
 }
 
 static void
@@ -331,20 +344,15 @@ tlstran_pipe_recv_cb(void *arg)
 		// Make sure the message payload is not too big.  If it is
 		// the caller will shut down the pipe.
 		if ((len > p->rcvmax) && (p->rcvmax > 0)) {
-			nng_sockaddr_storage ss;
-			nng_sockaddr        *sa = (nng_sockaddr *) &ss;
-			char                 peername[64] = "unknown";
-			if ((rv = nng_stream_get_addr(
-			         p->tls, NNG_OPT_REMADDR, sa)) == 0) {
-				(void) nng_str_sockaddr(
-				    sa, peername, sizeof(peername));
-			}
+			char peer[NNG_MAXADDRSTRLEN];
+
 			nng_log_warn("NNG-RCVMAX",
 			    "Oversize message of %lu bytes (> %lu) "
 			    "on socket<%u> pipe<%u> from TLS %s",
 			    (unsigned long) len, (unsigned long) p->rcvmax,
 			    nni_pipe_sock_id(p->npipe), nni_pipe_id(p->npipe),
-			    peername);
+			    nng_str_sockaddr(nng_stream_peer_addr(p->tls),
+			        peer, sizeof(peer)));
 			rv = NNG_EMSGSIZE;
 			goto recv_error;
 		}
@@ -865,7 +873,7 @@ tlstran_ep_bind(void *arg, nng_url *url)
 	if (rv == NNG_OK) {
 		int port;
 		nng_stream_listener_get_int(
-		    ep->listener, NNG_OPT_TCP_BOUND_PORT, &port);
+		    ep->listener, NNG_OPT_BOUND_PORT, &port);
 		url->u_port = (uint32_t) port;
 	}
 	nni_mtx_unlock(&ep->mtx);
@@ -952,6 +960,14 @@ tlstran_pipe_getopt(
 	return (rv);
 }
 
+static nng_err
+tlstran_pipe_peer_cert(void *arg, nng_tls_cert **certp)
+{
+	tlstran_pipe *p = arg;
+
+	return (nng_stream_peer_cert(p->tls, certp));
+}
+
 static size_t
 tlstran_pipe_size(void)
 {
@@ -959,15 +975,18 @@ tlstran_pipe_size(void)
 }
 
 static nni_sp_pipe_ops tlstran_pipe_ops = {
-	.p_size   = tlstran_pipe_size,
-	.p_init   = tlstran_pipe_init,
-	.p_fini   = tlstran_pipe_fini,
-	.p_stop   = tlstran_pipe_stop,
-	.p_send   = tlstran_pipe_send,
-	.p_recv   = tlstran_pipe_recv,
-	.p_close  = tlstran_pipe_close,
-	.p_peer   = tlstran_pipe_peer,
-	.p_getopt = tlstran_pipe_getopt,
+	.p_size      = tlstran_pipe_size,
+	.p_init      = tlstran_pipe_init,
+	.p_fini      = tlstran_pipe_fini,
+	.p_stop      = tlstran_pipe_stop,
+	.p_send      = tlstran_pipe_send,
+	.p_recv      = tlstran_pipe_recv,
+	.p_close     = tlstran_pipe_close,
+	.p_peer      = tlstran_pipe_peer,
+	.p_getopt    = tlstran_pipe_getopt,
+	.p_peer_cert = tlstran_pipe_peer_cert,
+	.p_peer_addr = tlstran_pipe_peer_addr,
+	.p_self_addr = tlstran_pipe_self_addr,
 };
 
 static nni_option tlstran_ep_options[] = {

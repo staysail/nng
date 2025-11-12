@@ -8,10 +8,13 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
-#include "core/pipe.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/lmq.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Pair protocol.  The PAIR protocol is a simple 1:1 messaging pattern.
 // While a peer is connected to the server, all other peer connection
@@ -557,7 +560,6 @@ static nni_proto_sock_ops pair0_sock_ops = {
 
 // Legacy protocol (v0)
 static nni_proto pair0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_PAIR_V0, "pair" },
 	.proto_peer     = { NNI_PROTO_PAIR_V0, "pair" },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,
@@ -566,7 +568,6 @@ static nni_proto pair0_proto = {
 };
 
 static nni_proto pair0_proto_raw = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_PAIR_V0, "pair" },
 	.proto_peer     = { NNI_PROTO_PAIR_V0, "pair" },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV | NNI_PROTO_FLAG_RAW,

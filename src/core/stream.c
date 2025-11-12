@@ -12,12 +12,15 @@
 
 #include <string.h>
 
-#include "core/nng_impl.h"
+#include "aio.h"
+#include "defs.h"
+#include "platform.h"
+#include "sockfd.h"
+#include "tcp.h"
+#include "url.h"
 
-#include "core/sockfd.h"
-#include "core/tcp.h"
-#include "supplemental/tls/tls_api.h"
-#include "supplemental/websocket/websocket.h"
+#include "../supplemental/tls/tls_api.h"
+#include "../supplemental/websocket/websocket.h"
 
 static struct {
 	const char *scheme;
@@ -132,6 +135,15 @@ void
 nng_stream_free(nng_stream *s)
 {
 	if (s != NULL) {
+		// These are mandatory - we have checks here for completeness.
+		NNI_ASSERT(s->s_close != NULL);
+		NNI_ASSERT(s->s_stop != NULL);
+		NNI_ASSERT(s->s_send != NULL);
+		NNI_ASSERT(s->s_recv != NULL);
+		NNI_ASSERT(s->s_free != NULL);
+		NNI_ASSERT(s->s_peer_addr != NULL);
+		NNI_ASSERT(s->s_self_addr != NULL);
+
 		s->s_free(s);
 	}
 }
@@ -367,7 +379,7 @@ nng_stream_get_size(nng_stream *s, const char *n, size_t *v)
 }
 
 nng_err
-nng_stream_get_string(nng_stream *s, const char *n, char **v)
+nng_stream_get_string(nng_stream *s, const char *n, const char **v)
 {
 	return (nni_stream_get(s, n, v, NULL, NNI_TYPE_STRING));
 }
@@ -378,10 +390,25 @@ nng_stream_get_ms(nng_stream *s, const char *n, nng_duration *v)
 	return (nni_stream_get(s, n, v, NULL, NNI_TYPE_DURATION));
 }
 
-nng_err
-nng_stream_get_addr(nng_stream *s, const char *n, nng_sockaddr *v)
+const nng_sockaddr *
+nng_stream_self_addr(nng_stream *s)
 {
-	return (nni_stream_get(s, n, v, NULL, NNI_TYPE_SOCKADDR));
+	return (s->s_self_addr(s));
+}
+
+const nng_sockaddr *
+nng_stream_peer_addr(nng_stream *s)
+{
+	return (s->s_peer_addr(s));
+}
+
+nng_err
+nng_stream_peer_cert(nng_stream *s, nng_tls_cert **certp)
+{
+	if (s->s_peer_cert == NULL) {
+		return (NNG_ENOTSUP);
+	}
+	return (s->s_peer_cert(s, certp));
 }
 
 nng_err
@@ -403,7 +430,8 @@ nng_stream_dialer_get_size(nng_stream_dialer *d, const char *n, size_t *v)
 }
 
 nng_err
-nng_stream_dialer_get_string(nng_stream_dialer *d, const char *n, char **v)
+nng_stream_dialer_get_string(
+    nng_stream_dialer *d, const char *n, const char **v)
 {
 	return (nni_stream_dialer_get(d, n, v, NULL, NNI_TYPE_STRING));
 }
@@ -412,13 +440,6 @@ nng_err
 nng_stream_dialer_get_ms(nng_stream_dialer *d, const char *n, nng_duration *v)
 {
 	return (nni_stream_dialer_get(d, n, v, NULL, NNI_TYPE_DURATION));
-}
-
-nng_err
-nng_stream_dialer_get_addr(
-    nng_stream_dialer *d, const char *n, nng_sockaddr *v)
-{
-	return (nni_stream_dialer_get(d, n, v, NULL, NNI_TYPE_SOCKADDR));
 }
 
 nng_err
@@ -446,7 +467,8 @@ nng_stream_listener_get_size(nng_stream_listener *l, const char *n, size_t *v)
 }
 
 nng_err
-nng_stream_listener_get_string(nng_stream_listener *l, const char *n, char **v)
+nng_stream_listener_get_string(
+    nng_stream_listener *l, const char *n, const char **v)
 {
 	return (nni_stream_listener_get(l, n, v, NULL, NNI_TYPE_STRING));
 }
@@ -456,13 +478,6 @@ nng_stream_listener_get_ms(
     nng_stream_listener *l, const char *n, nng_duration *v)
 {
 	return (nni_stream_listener_get(l, n, v, NULL, NNI_TYPE_DURATION));
-}
-
-nng_err
-nng_stream_listener_get_addr(
-    nng_stream_listener *l, const char *n, nng_sockaddr *v)
-{
-	return (nni_stream_listener_get(l, n, v, NULL, NNI_TYPE_SOCKADDR));
 }
 
 nng_err

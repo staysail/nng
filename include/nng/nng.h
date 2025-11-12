@@ -24,6 +24,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 // NNG_DECL is used on declarations to deal with scope.
 // For building Windows DLLs, it should be the appropriate __declspec().
@@ -73,7 +74,7 @@ extern "C" {
 // NNG_PROTOCOL_NUMBER is used by protocol headers to calculate their
 // protocol number from a major and minor number.  Applications should
 // probably not need to use this.
-#define NNG_PROTOCOL_NUMBER(maj, min) (((x) *16) + (y))
+#define NNG_PROTOCOL_NUMBER(maj, min) (((x) * 16) + (y))
 
 // Types common to nng.
 
@@ -175,6 +176,10 @@ typedef struct nng_url nng_url;
 // For some transports, we need TLS configuration, including certificates
 // and so forth.  A TLS configuration cannot be changed once it is in use.
 typedef struct nng_tls_config nng_tls_config;
+
+// This is a representation of X.509 certificate as used in TLS transports.
+// Internal details are opaque.
+typedef struct nng_tls_cert_s nng_tls_cert;
 
 // Initializers.
 // clang-format off
@@ -385,6 +390,14 @@ NNG_DECL int nng_listener_create_url(
 // the dialer is not already dialing.
 NNG_DECL int nng_dialer_start(nng_dialer, int);
 
+// nng_dialer_start_aio starts the endpoint dialing asynchronously.  This is
+// only possible if the dialer is not already dialing.  Unlike
+// nng_dialer_start, this accepts an AIO such that the caller can learn when
+// the dialing eventually succeeds or fails.  The supplied AIO must have been
+// initialized, and is only triggered with the result of the first dial
+// attempt.
+NNG_DECL void nng_dialer_start_aio(nng_dialer, int, nng_aio *);
+
 // nng_listener_start starts the endpoint listening.  This is only possible if
 // the listener is not already listening.
 NNG_DECL int nng_listener_start(nng_listener, int);
@@ -419,7 +432,7 @@ NNG_DECL int nng_dialer_get_bool(nng_dialer, const char *, bool *);
 NNG_DECL int nng_dialer_get_int(nng_dialer, const char *, int *);
 NNG_DECL int nng_dialer_get_size(nng_dialer, const char *, size_t *);
 NNG_DECL int nng_dialer_get_uint64(nng_dialer, const char *, uint64_t *);
-NNG_DECL int nng_dialer_get_string(nng_dialer, const char *, char **);
+NNG_DECL int nng_dialer_get_string(nng_dialer, const char *, const char **);
 NNG_DECL int nng_dialer_get_ms(nng_dialer, const char *, nng_duration *);
 NNG_DECL int nng_dialer_get_addr(nng_dialer, const char *, nng_sockaddr *);
 NNG_DECL int nng_dialer_get_tls(nng_dialer, nng_tls_config **);
@@ -431,8 +444,6 @@ NNG_DECL int nng_listener_set_size(nng_listener, const char *, size_t);
 NNG_DECL int nng_listener_set_uint64(nng_listener, const char *, uint64_t);
 NNG_DECL int nng_listener_set_string(nng_listener, const char *, const char *);
 NNG_DECL int nng_listener_set_ms(nng_listener, const char *, nng_duration);
-NNG_DECL int nng_listener_set_addr(
-    nng_listener, const char *, const nng_sockaddr *);
 NNG_DECL int nng_listener_set_tls(nng_listener, nng_tls_config *);
 NNG_DECL int nng_listener_set_security_descriptor(nng_listener, void *);
 NNG_DECL int nng_listener_get_url(nng_listener id, const nng_url **urlp);
@@ -441,9 +452,9 @@ NNG_DECL int nng_listener_get_bool(nng_listener, const char *, bool *);
 NNG_DECL int nng_listener_get_int(nng_listener, const char *, int *);
 NNG_DECL int nng_listener_get_size(nng_listener, const char *, size_t *);
 NNG_DECL int nng_listener_get_uint64(nng_listener, const char *, uint64_t *);
-NNG_DECL int nng_listener_get_string(nng_listener, const char *, char **);
+NNG_DECL int nng_listener_get_string(
+    nng_listener, const char *, const char **);
 NNG_DECL int nng_listener_get_ms(nng_listener, const char *, nng_duration *);
-NNG_DECL int nng_listener_get_addr(nng_listener, const char *, nng_sockaddr *);
 NNG_DECL int nng_listener_get_tls(nng_listener, nng_tls_config **);
 
 // nng_strerror returns a human-readable string associated with the error
@@ -678,7 +689,7 @@ NNG_DECL void nng_aio_reset(nng_aio *);
 // The argument is the value that nng_aio_result() should return.
 // IMPORTANT: Callers must ensure that this is called EXACTLY ONCE on any
 // given aio.
-NNG_DECL void nng_aio_finish(nng_aio *, int);
+NNG_DECL void nng_aio_finish(nng_aio *, nng_err);
 
 // nng_aio_start is used to register a cancellation routine, and indicate
 // that the operation will be completed asynchronously.  It must only be
@@ -757,8 +768,13 @@ NNG_DECL nng_err nng_pipe_get_bool(nng_pipe, const char *, bool *);
 NNG_DECL nng_err nng_pipe_get_int(nng_pipe, const char *, int *);
 NNG_DECL nng_err nng_pipe_get_ms(nng_pipe, const char *, nng_duration *);
 NNG_DECL nng_err nng_pipe_get_size(nng_pipe, const char *, size_t *);
-NNG_DECL nng_err nng_pipe_get_string(nng_pipe, const char *, char **);
-NNG_DECL nng_err nng_pipe_get_addr(nng_pipe, const char *, nng_sockaddr *);
+NNG_DECL nng_err nng_pipe_get_string(nng_pipe, const char *, const char **);
+NNG_DECL nng_err nng_pipe_get_strdup(nng_pipe, const char *, char **);
+NNG_DECL nng_err nng_pipe_get_strcpy(nng_pipe, const char *, char *, size_t);
+NNG_DECL nng_err nng_pipe_get_strlen(nng_pipe, const char *, size_t *);
+NNG_DECL nng_err nng_pipe_peer_addr(nng_pipe, nng_sockaddr *);
+NNG_DECL nng_err nng_pipe_self_addr(nng_pipe, nng_sockaddr *);
+NNG_DECL nng_err nng_pipe_peer_cert(nng_pipe, nng_tls_cert **);
 
 NNG_DECL nng_err      nng_pipe_close(nng_pipe);
 NNG_DECL int          nng_pipe_id(nng_pipe);
@@ -775,7 +791,6 @@ NNG_DECL nng_listener nng_pipe_listener(nng_pipe);
 #define NNG_OPT_RECVTIMEO "recv-timeout"
 #define NNG_OPT_SENDTIMEO "send-timeout"
 #define NNG_OPT_LOCADDR "local-address"
-#define NNG_OPT_REMADDR "remote-address"
 #define NNG_OPT_MAXTTL "ttl-max"
 #define NNG_OPT_RECVMAXSZ "recv-size-max"
 #define NNG_OPT_RECONNMINT "reconnect-time-min"
@@ -794,13 +809,6 @@ NNG_DECL nng_listener nng_pipe_listener(nng_pipe);
 // only available for pipes. This option may return incorrect results if
 // peer authentication is disabled with `NNG_TLS_AUTH_MODE_NONE`.
 #define NNG_OPT_TLS_PEER_CN "tls-peer-cn"
-
-// NNG_OPT_TLS_PEER_ALT_NAMES returns string list with the
-// subject alternative names of the peer certificate. Typically this is
-// read-only and only available for pipes. This option may return
-// incorrect results if peer authentication is disabled with
-// `NNG_TLS_AUTH_MODE_NONE`.
-#define NNG_OPT_TLS_PEER_ALT_NAMES "tls-peer-alt-names"
 
 // TCP options.  These may be supported on various transports that use
 // TCP underneath such as TLS, or not.
@@ -822,18 +830,14 @@ NNG_DECL nng_listener nng_pipe_listener(nng_pipe);
 // state current). This is a boolean.
 #define NNG_OPT_TCP_KEEPALIVE "tcp-keepalive"
 
-// Local TCP port number.  This is used on a listener, and is intended
+// Local TCP or UDP port number.  This is used on a listener, and is intended
 // to be used after starting the listener in combination with a wildcard
 // (0) local port.  This determines the actual ephemeral port that was
-// selected and bound.  The value is provided as an int, but only the
-// low order 16 bits will be set.  This is provided in native byte order,
-// which makes it more convenient than using the NNG_OPT_LOCADDR option.
-#define NNG_OPT_TCP_BOUND_PORT "tcp-bound-port"
+// selected and bound.  The value is provided as an int, but in practice
+// port numbers are only 16-bits.
+#define NNG_OPT_BOUND_PORT "bound-port"
 
 // UDP options.
-
-// UDP alias for convenience uses the same value
-#define NNG_OPT_UDP_BOUND_PORT NNG_OPT_TCP_BOUND_PORT
 
 // UDP short message size.  Messages smaller than (or equal to) this
 // will be copied, instead of loan up.  This can allow for a faster
@@ -884,6 +888,19 @@ NNG_DECL nng_listener nng_pipe_listener(nng_pipe);
 // on outgoing dialer or listeners, and can be used to return the
 // headers from the peer on a pipe.
 #define NNG_OPT_WS_HEADER "ws:header:"
+
+// These options allow for iterating over HTTP headers.  The iteration is
+// started and advances by getting NNG_OPT_WS_HEADER_NEXT (which returns a bool
+// that is true if there was a header, or false if no more headers are
+// available).  The HTTP_OPT_WS_HEADER_RESET is a boolean option that always
+// returns true. Reading it resets the iteration to the beginning.  The
+// NNG_OPT_WS_HEADER_KEY and NNG_OPT_WS_HEADER_VALUE options obtain the header
+// name and value for the current (established by NNG_OPT_WS_HEADER_NEXT) HTTP
+// header.
+#define NNG_OPT_WS_HEADER_NEXT "ws:hdr-next"
+#define NNG_OPT_WS_HEADER_RESET "ws:hdr-reset"
+#define NNG_OPT_WS_HEADER_KEY "ws:hdr-key"
+#define NNG_OPT_WS_HEADER_VALUE "ws:hdr-val"
 
 // NNG_OPT_WS_REQUEST_URI is used to obtain the URI sent by the client.
 // This can be useful when a handler supports an entire directory tree.
@@ -1134,9 +1151,11 @@ NNG_DECL nng_err nng_stream_get_int(nng_stream *, const char *, int *);
 NNG_DECL nng_err nng_stream_get_ms(nng_stream *, const char *, nng_duration *);
 NNG_DECL nng_err nng_stream_get_size(nng_stream *, const char *, size_t *);
 NNG_DECL nng_err nng_stream_get_uint64(nng_stream *, const char *, uint64_t *);
-NNG_DECL nng_err nng_stream_get_string(nng_stream *, const char *, char **);
-NNG_DECL nng_err nng_stream_get_addr(
-    nng_stream *, const char *, nng_sockaddr *);
+NNG_DECL nng_err nng_stream_get_string(
+    nng_stream *, const char *, const char **);
+NNG_DECL const nng_sockaddr *nng_stream_peer_addr(nng_stream *);
+NNG_DECL const nng_sockaddr *nng_stream_self_addr(nng_stream *);
+NNG_DECL nng_err nng_stream_peer_cert(nng_stream *, nng_tls_cert **);
 
 NNG_DECL nng_err nng_stream_dialer_alloc(nng_stream_dialer **, const char *);
 NNG_DECL nng_err nng_stream_dialer_alloc_url(
@@ -1156,9 +1175,7 @@ NNG_DECL nng_err nng_stream_dialer_get_size(
 NNG_DECL nng_err nng_stream_dialer_get_uint64(
     nng_stream_dialer *, const char *, uint64_t *);
 NNG_DECL nng_err nng_stream_dialer_get_string(
-    nng_stream_dialer *, const char *, char **);
-NNG_DECL nng_err nng_stream_dialer_get_addr(
-    nng_stream_dialer *, const char *, nng_sockaddr *);
+    nng_stream_dialer *, const char *, const char **);
 NNG_DECL nng_err nng_stream_dialer_set_bool(
     nng_stream_dialer *, const char *, bool);
 NNG_DECL nng_err nng_stream_dialer_set_int(
@@ -1203,9 +1220,7 @@ NNG_DECL nng_err nng_stream_listener_get_size(
 NNG_DECL nng_err nng_stream_listener_get_uint64(
     nng_stream_listener *, const char *, uint64_t *);
 NNG_DECL nng_err nng_stream_listener_get_string(
-    nng_stream_listener *, const char *, char **);
-NNG_DECL nng_err nng_stream_listener_get_addr(
-    nng_stream_listener *, const char *, nng_sockaddr *);
+    nng_stream_listener *, const char *, const char **);
 NNG_DECL nng_err nng_stream_listener_set_bool(
     nng_stream_listener *, const char *, bool);
 NNG_DECL nng_err nng_stream_listener_set_int(
@@ -1615,6 +1630,30 @@ NNG_DECL const char *nng_tls_engine_description(void);
 
 // nng_tls_engine_fips_mode returns true if the engine is in FIPS 140 mode.
 NNG_DECL bool nng_tls_engine_fips_mode(void);
+
+// nng_tls_cert_parse parses PEM content to obtain an object suitable for
+// use with TLS APIs.
+NNG_DECL nng_err nng_tls_cert_parse_pem(nng_tls_cert **, const char *, size_t);
+
+// nng_tls_cert_parse_der parses a DER (distinguished encoding rules) format
+// certificate.
+NNG_DECL nng_err nng_tls_cert_parse_der(
+    nng_tls_cert **, const uint8_t *, size_t);
+
+// nng_tls_cert_der extracts the certificate as DER content.  This can be
+// useful for importing into other APIs such as OpenSSL or mbedTLS directly.
+NNG_DECL void nng_tls_cert_der(nng_tls_cert *cert, uint8_t *, size_t *);
+
+// nng_tls_cert_free releases the certificate from memory.
+NNG_DECL void nng_tls_cert_free(nng_tls_cert *);
+
+NNG_DECL nng_err nng_tls_cert_subject(nng_tls_cert *, char **);
+NNG_DECL nng_err nng_tls_cert_issuer(nng_tls_cert *, char **);
+NNG_DECL nng_err nng_tls_cert_serial_number(nng_tls_cert *, char **);
+NNG_DECL nng_err nng_tls_cert_subject_cn(nng_tls_cert *, char **);
+NNG_DECL nng_err nng_tls_cert_next_alt(nng_tls_cert *, char **);
+NNG_DECL nng_err nng_tls_cert_not_before(nng_tls_cert *, struct tm *);
+NNG_DECL nng_err nng_tls_cert_not_after(nng_tls_cert *, struct tm *);
 
 // Public ID map support.
 typedef struct nng_id_map_s nng_id_map;

@@ -8,11 +8,13 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdbool.h>
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
-#include <stdio.h>
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/lmq.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Bus protocol.  The BUS protocol, each peer sends a message to its peers.
 // However, bus protocols do not "forward" (absent a device).  So in order
@@ -501,7 +503,6 @@ static nni_proto_sock_ops bus0_sock_ops_raw = {
 };
 
 static nni_proto bus0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_BUS_V0, "bus" },
 	.proto_peer     = { NNI_PROTO_BUS_V0, "bus" },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,
@@ -510,7 +511,6 @@ static nni_proto bus0_proto = {
 };
 
 static nni_proto bus0_proto_raw = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_BUS_V0, "bus" },
 	.proto_peer     = { NNI_PROTO_BUS_V0, "bus" },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV | NNI_PROTO_FLAG_RAW,

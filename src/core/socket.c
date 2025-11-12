@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -8,12 +8,11 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include "core/defs.h"
-#include "core/nng_impl.h"
-#include "core/options.h"
-#include "core/pipe.h"
+#include "defs.h"
 #include "list.h"
-#include "nng/nng.h"
+#include "nng_impl.h"
+#include "options.h"
+#include "pipe.h"
 #include "sockimpl.h"
 
 #include <stdio.h>
@@ -577,11 +576,6 @@ nni_sock_open(nni_sock **sockp, const nni_proto *proto)
 {
 	nni_sock *s = NULL;
 	int       rv;
-
-	if (proto->proto_version != NNI_PROTOCOL_VERSION) {
-		// unsupported protocol version
-		return (NNG_ENOTSUP);
-	}
 
 	if ((rv = nni_sock_create(&s, proto)) != 0) {
 		return (rv);
@@ -1302,7 +1296,8 @@ dialer_start_pipe(nni_dialer *d, nni_pipe *p)
 			char addr[NNG_MAXADDRSTRLEN];
 			nng_log_debug("NNG-PIPEREJECT",
 			    "Pipe on socket<%u> from %s rejected by callback",
-			    nni_pipe_sock_id(p), nni_pipe_peer_addr(p, addr));
+			    nni_pipe_sock_id(p),
+			    nni_pipe_peer_str_addr(p, addr));
 		}
 		nni_pipe_rele(p);
 		return;
@@ -1324,10 +1319,13 @@ dialer_start_pipe(nni_dialer *d, nni_pipe *p)
 #endif
 	nni_pipe_run_cb(p, NNG_PIPE_EV_ADD_POST);
 	if (nng_log_get_level() >= NNG_LOG_DEBUG) {
-		char addr[NNG_MAXADDRSTRLEN];
+		char peer_addr[NNG_MAXADDRSTRLEN];
+		char self_addr[NNG_MAXADDRSTRLEN];
 		nng_log_debug("NNG-CONNECT",
-		    "Connected pipe<%u> on socket<%u> to %s", nni_pipe_id(p),
-		    nni_sock_id(s), nni_pipe_peer_addr(p, addr));
+		    "Connected pipe<%u> on socket<%u> at %s to %s",
+		    nni_pipe_id(p), nni_sock_id(s),
+		    nni_pipe_self_str_addr(p, self_addr),
+		    nni_pipe_peer_str_addr(p, peer_addr));
 	}
 	nni_pipe_rele(p);
 }
@@ -1430,10 +1428,13 @@ listener_start_pipe(nni_listener *l, nni_pipe *p)
 #endif
 	nni_pipe_run_cb(p, NNG_PIPE_EV_ADD_POST);
 	if (nng_log_get_level() >= NNG_LOG_DEBUG) {
-		char addr[NNG_MAXADDRSTRLEN];
+		char peer_addr[NNG_MAXADDRSTRLEN];
+		char self_addr[NNG_MAXADDRSTRLEN];
 		nng_log_debug("NNG-ACCEPT",
-		    "Accepted pipe<%u> on socket<%u> from %s", nni_pipe_id(p),
-		    nni_sock_id(s), nni_pipe_peer_addr(p, addr));
+		    "Accepted pipe<%u> on socket<%u> at %s from %s",
+		    nni_pipe_id(p), nni_sock_id(s),
+		    nni_pipe_self_str_addr(p, self_addr),
+		    nni_pipe_peer_str_addr(p, peer_addr));
 	}
 
 	// the socket now "owns" the pipe, and a pipe close should immediately

@@ -7,9 +7,17 @@
 // file was obtained (LICENSE.txt).  A copy of the license may also be
 // found online at https://opensource.org/licenses/MIT.
 //
-#include <stdio.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/list.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/platform.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 // Request protocol.  The REQ protocol is the "request" side of a
 // request-reply pair.  This is useful for building RPC clients, for example.
@@ -925,7 +933,6 @@ static nni_proto_sock_ops req0_sock_ops = {
 };
 
 static nni_proto req0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { REQ0_SELF, REQ0_SELF_NAME },
 	.proto_peer     = { REQ0_PEER, REQ0_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,

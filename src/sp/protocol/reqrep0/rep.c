@@ -10,7 +10,14 @@
 
 #include <string.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/list.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Response protocol.  The REP protocol is the "reply" side of a
 // request-reply pair.  This is useful for building RPC servers, for
@@ -666,7 +673,6 @@ static nni_proto_sock_ops rep0_sock_ops = {
 };
 
 static nni_proto rep0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { REP0_SELF, REP0_SELF_NAME },
 	.proto_peer     = { REP0_PEER, REP0_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,

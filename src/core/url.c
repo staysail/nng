@@ -8,16 +8,15 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include "core/defs.h"
-#include "core/nng_impl.h"
-
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "core/platform.h"
-#include "nng/nng.h"
+#include "aio.h"
+#include "defs.h"
+#include "platform.h"
+#include "strs.h"
 #include "url.h"
 
 static uint8_t
@@ -572,7 +571,7 @@ nng_url_sprintf(char *str, size_t size, const nng_url *url)
 		return (snprintf(str, size, "%s://%s", scheme, url->u_path));
 	}
 
-	if (url->u_port == nni_url_default_port(scheme)) {
+	if (url->u_port != 0 && url->u_port == nni_url_default_port(scheme)) {
 		do_port = false;
 	}
 	if (strchr(host, ':') != 0) {

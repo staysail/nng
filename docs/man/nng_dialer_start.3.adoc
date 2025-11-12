@@ -44,7 +44,8 @@ Furthermore, if the connection was closed for a synchronously dialed
 connection, the dialer will still attempt to redial asynchronously.
 
 TIP: While `NNG_FLAG_NONBLOCK` can help an application be more resilient,
-it also generally makes diagnosing failures somewhat more difficult.
+it also generally makes diagnosing failures somewhat more difficult. You may
+want to use xref:nng_dialer_start_aio.3.adoc[`nng_dialer_start_aio()`].
 
 Once a dialer has started, it is generally not possible to change
 its configuration.
@@ -61,6 +62,7 @@ This function returns 0 on success, and non-zero otherwise.
 `NNG_ECONNREFUSED`:: The remote peer refused the connection.
 `NNG_ECONNRESET`:: The remote peer reset the connection.
 `NNG_EINVAL`:: An invalid set of _flags_ was specified.
+`NNG_ENOENT`:: The dialer handle is invalid.
 `NNG_ENOMEM`:: Insufficient memory is available.
 `NNG_EPEERAUTH`:: Authentication or authorization failure.
 `NNG_EPROTO`:: A protocol error occurred.
@@ -72,6 +74,7 @@ This function returns 0 on success, and non-zero otherwise.
 [.text-left]
 xref:nng_dial.3.adoc[nng_dial(3)],
 xref:nng_dialer_create.3.adoc[nng_dialer_create(3)]
+xref:nng_dialer_start_aio.3.adoc[nng_dialer_start_aio(3)]
 xref:nng_strerror.3.adoc[nng_strerror(3)],
 xref:nng_dialer.5.adoc[nng_dialer(5)],
 xref:nng.7.adoc[nng(7)]

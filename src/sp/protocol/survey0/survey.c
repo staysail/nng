@@ -8,9 +8,16 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/list.h"
+#include "../../../core/lmq.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/platform.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Surveyor protocol.  The SURVEYOR protocol is the "survey" side of the
 // survey pattern.  This is useful for building service discovery, voting, etc.
@@ -601,7 +608,6 @@ static nni_proto_sock_ops surv0_sock_ops = {
 };
 
 static nni_proto surv0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { SURVEYOR0_SELF, SURVEYOR0_SELF_NAME },
 	.proto_peer     = { SURVEYOR0_PEER, SURVEYOR0_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,

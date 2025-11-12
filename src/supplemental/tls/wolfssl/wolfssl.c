@@ -31,7 +31,7 @@
 
 #include <wolfssl/ssl.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/nng_impl.h"
 #include "nng/nng.h"
 
 #include "../tls_engine.h"
@@ -41,6 +41,13 @@ struct nng_tls_engine_conn {
 	WOLFSSL_CTX *ctx;
 	WOLFSSL     *ssl;
 	int          auth_mode;
+};
+
+struct nng_tls_engine_cert {
+	WOLFSSL_X509 *crt;
+	char         *subject;
+	char         *issuer;
+	char          serial[64]; // maximum binary serial is 20 bytes
 };
 
 typedef struct psk {
@@ -107,8 +114,8 @@ tls_log_err(const char *msgid, const char *context, int errnum)
 static int
 wolf_net_send(WOLFSSL *ssl, char *buf, int len, void *ctx)
 {
-	size_t sz = len;
-	int    rv;
+	size_t  sz = len;
+	nng_err rv;
 	(void) ssl;
 
 	rv = nng_tls_engine_send(ctx, (const uint8_t *) buf, &sz);
@@ -129,8 +136,8 @@ wolf_net_send(WOLFSSL *ssl, char *buf, int len, void *ctx)
 static int
 wolf_net_recv(WOLFSSL *ssl, char *buf, int len, void *ctx)
 {
-	size_t sz = len;
-	int    rv;
+	size_t  sz = len;
+	nng_err rv;
 	(void) ssl;
 
 	rv = nng_tls_engine_recv(ctx, (uint8_t *) buf, &sz);
@@ -279,6 +286,51 @@ wolf_conn_verified(nng_tls_engine_conn *ec)
 		// We ignore it.
 		return (false);
 	}
+}
+
+static nng_err
+wolf_conn_peer_cert(nng_tls_engine_conn *ec, nng_tls_engine_cert **certp)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	nng_tls_engine_cert *cert;
+
+	WOLFSSL_X509 *wc;
+	if ((wc = wolfSSL_get_peer_certificate(ec->ssl)) == NULL) {
+		return (NNG_ENOENT);
+	}
+	if ((cert = nni_zalloc(sizeof(*cert))) == NULL) {
+		wolfSSL_X509_free(wc);
+		return (NNG_ENOMEM);
+	}
+	cert->crt = wc;
+	*certp    = cert;
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(ec);
+	NNI_ARG_UNUSED(certp);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static char *
+wolf_conn_peer_cn(nng_tls_engine_conn *ec)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_X509 *cert;
+	char         *cn;
+
+	if ((cert = wolfSSL_get_peer_certificate(ec->ssl)) == NULL) {
+		return (NULL);
+	}
+	cn = wolfSSL_X509_get_subjectCN(cert);
+	if (cn != NULL) {
+		cn = nng_strdup(cn);
+	}
+	return (cn);
+#else
+	NNI_ARG_UNUSED(ec);
+	return (NULL);
+#endif
 }
 
 static void
@@ -439,6 +491,7 @@ wolf_config_psk(nng_tls_engine_config *cfg, const char *identity,
 	NNI_ARG_UNUSED(identity);
 	NNI_ARG_UNUSED(key);
 	NNI_ARG_UNUSED(key_len);
+	return (NNG_ENOTSUP);
 #else
 	psk *psk, *srch;
 
@@ -626,6 +679,240 @@ wolf_config_version(nng_tls_engine_config *cfg, nng_tls_version min_ver,
 }
 
 static void
+wolf_cert_free(nng_tls_engine_cert *cert)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	if (cert->subject != NULL) {
+		wolfSSL_Free(cert->subject);
+	}
+	if (cert->issuer != NULL) {
+		wolfSSL_Free(cert->issuer);
+	}
+	if (cert->crt != NULL) {
+		wolfSSL_X509_free(cert->crt);
+	}
+	nni_free(cert, sizeof(*cert));
+#else
+	NNI_ARG_UNUSED(cert);
+#endif
+}
+
+// In struct nng_tls_engine_cert_ops_s
+static nng_err
+wolf_cert_get_der(nng_tls_engine_cert *cert, uint8_t *buf, size_t *sz)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	const uint8_t *der;
+	int            derSz;
+	der = wolfSSL_X509_get_der(cert->crt, &derSz);
+	if (*sz < (size_t) derSz) {
+		*sz = (size_t) derSz;
+		return (NNG_ENOSPC);
+	}
+	*sz = (size_t) derSz;
+	memcpy(buf, der, *sz);
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(buf);
+	NNI_ARG_UNUSED(sz);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_parse_der(
+    nng_tls_engine_cert **crtp, const uint8_t *der, size_t size)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_X509        *x;
+	nng_tls_engine_cert *cert;
+
+	if ((cert = nni_zalloc(sizeof(*cert))) == NULL) {
+		return (NNG_ENOMEM);
+	}
+	if ((cert->crt = wolfSSL_X509_d2i(&x, der, size)) == NULL) {
+		nni_free(cert, sizeof(*cert));
+		return (NNG_ENOMEM);
+	}
+	*crtp = cert;
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(crtp);
+	NNI_ARG_UNUSED(der);
+	NNI_ARG_UNUSED(size);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_parse_pem(nng_tls_engine_cert **crtp, const char *pem, size_t size)
+{
+	nng_err  rv;
+	uint8_t *derBuf;
+	int      derSize;
+
+	// DER files are smaller than PEM (PEM is base64 encoded and includes
+	// headers)
+	if ((derBuf = nni_alloc(size)) == NULL) {
+		return (NNG_ENOMEM);
+	}
+
+	derSize = wc_CertPemToDer(
+	    (const uint8_t *) pem, size, derBuf, size, 0 /* cert type */);
+	if (derSize < 0) {
+		nni_free(derBuf, size);
+		return (NNG_ECRYPTO);
+	}
+
+	rv = wolf_cert_parse_der(crtp, derBuf, derSize);
+	nni_free(derBuf, size);
+	return (rv);
+}
+
+static nng_err
+wolf_cert_subject(nng_tls_engine_cert *cert, char **subject)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_X509_NAME *xn;
+
+	if (cert->subject != NULL) {
+		*subject = cert->subject;
+		return (NNG_OK);
+	}
+
+	xn = wolfSSL_X509_get_subject_name(cert->crt);
+	if (xn == NULL) {
+		return (NNG_ENOENT);
+	}
+	cert->subject = wolfSSL_X509_NAME_oneline(xn, NULL, 0);
+	*subject      = cert->subject;
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(subject);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_issuer(nng_tls_engine_cert *cert, char **issuer)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_X509_NAME *xn;
+
+	if (cert->issuer != NULL) {
+		*issuer = cert->issuer;
+		return (NNG_OK);
+	}
+
+	xn = wolfSSL_X509_get_issuer_name(cert->crt);
+	if (xn == NULL) {
+		return (NNG_ENOENT);
+	}
+	cert->issuer = wolfSSL_X509_NAME_oneline(xn, NULL, 0);
+	*issuer      = cert->issuer;
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(issuer);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_serial(nng_tls_engine_cert *cert, char **serial)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	uint8_t num[20]; // max is 20 bytes per RFC
+	char   *s;
+	int     len;
+
+	if (cert->serial[0] != 0) {
+		*serial = cert->serial;
+		return (NNG_OK);
+	}
+
+	len = sizeof(num);
+	wolfSSL_X509_get_serial_number(cert->crt, num, &len);
+
+	s = cert->serial;
+	for (int i = 0; i < len; i++) {
+		snprintf(s, 4, "%s%02X", i > 0 ? ":" : "", num[i]);
+		s += strlen(s);
+	}
+	*serial = cert->serial;
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(serial);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_subject_cn(nng_tls_engine_cert *cert, char **cn)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	*cn = wolfSSL_X509_get_subjectCN(cert->crt);
+	if (*cn == NULL) {
+		return (NNG_ENOENT);
+	}
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(cn);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_next_alt(nng_tls_engine_cert *cert, char **alt)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	*alt = wolfSSL_X509_get_next_altname(cert->crt);
+	if (*alt == NULL) {
+		return (NNG_ENOENT);
+	}
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(alt);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_not_before(nng_tls_engine_cert *cert, struct tm *tmp)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_ASN1_TIME *when;
+	when = wolfSSL_X509_get_notBefore(cert->crt);
+	wolfSSL_ASN1_TIME_to_tm(when, tmp);
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(tmp);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static nng_err
+wolf_cert_not_after(nng_tls_engine_cert *cert, struct tm *tmp)
+{
+#ifdef NNG_WOLFSSL_HAVE_PEER_CERT
+	WOLFSSL_ASN1_TIME *when;
+	when = wolfSSL_X509_get_notAfter(cert->crt);
+	wolfSSL_ASN1_TIME_to_tm(when, tmp);
+	return (NNG_OK);
+#else
+	NNI_ARG_UNUSED(cert);
+	NNI_ARG_UNUSED(tmp);
+	return (NNG_ENOTSUP);
+#endif
+}
+
+static void
 wolf_logging_cb(const int level, const char *msg)
 {
 	switch (level) {
@@ -698,12 +985,29 @@ static nng_tls_engine_conn_ops wolf_conn_ops = {
 	.send      = wolf_conn_send,
 	.handshake = wolf_conn_handshake,
 	.verified  = wolf_conn_verified,
+	.peer_cn   = wolf_conn_peer_cn,
+	.peer_cert = wolf_conn_peer_cert,
+};
+
+static nng_tls_engine_cert_ops wolf_cert_ops = {
+	.fini          = wolf_cert_free,
+	.get_der       = wolf_cert_get_der,
+	.parse_der     = wolf_cert_parse_der,
+	.parse_pem     = wolf_cert_parse_pem,
+	.subject       = wolf_cert_subject,
+	.issuer        = wolf_cert_issuer,
+	.serial_number = wolf_cert_serial,
+	.subject_cn    = wolf_cert_subject_cn,
+	.next_alt_name = wolf_cert_next_alt,
+	.not_before    = wolf_cert_not_before,
+	.not_after     = wolf_cert_not_after,
 };
 
 nng_tls_engine nng_tls_engine_ops = {
 	.version     = NNG_TLS_ENGINE_VERSION,
 	.config_ops  = &wolf_config_ops,
 	.conn_ops    = &wolf_conn_ops,
+	.cert_ops    = &wolf_cert_ops,
 	.name        = "wolf",
 	.description = "wolfSSL " LIBWOLFSSL_VERSION_STRING,
 	.init        = tls_engine_init,

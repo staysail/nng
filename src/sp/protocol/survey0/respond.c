@@ -8,10 +8,16 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/list.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Respondent protocol.  The RESPONDENT protocol is the "replier" side of
 // the surveyor pattern.  This is useful for building service discovery, or
@@ -653,7 +659,6 @@ static nni_proto_sock_ops resp0_sock_ops = {
 };
 
 static nni_proto resp0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_RESPONDENT_V0, "respondent" },
 	.proto_peer     = { NNI_PROTO_SURVEYOR_V0, "surveyor" },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,

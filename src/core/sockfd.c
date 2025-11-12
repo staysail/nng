@@ -10,10 +10,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <nng/nng.h>
-
-#include "core/nng_impl.h"
-#include "core/sockfd.h"
+#include "aio.h"
+#include "defs.h"
+#include "list.h"
+#include "options.h"
+#include "sockfd.h"
+#include "stream.h"
+#include "thread.h"
 
 // We will accept up to this many FDs to be queued up for
 // accept, before we start rejecting with NNG_ENOSPC.  Once
@@ -170,23 +173,10 @@ sfd_listener_set_fd(void *arg, const void *buf, size_t sz, nni_type t)
 	return (NNG_OK);
 }
 
-static nng_err
-sfd_listener_get_addr(void *arg, void *buf, size_t *szp, nni_type t)
-{
-	NNI_ARG_UNUSED(arg);
-	nng_sockaddr sa;
-	sa.s_family = NNG_AF_UNSPEC;
-	return (nni_copyout_sockaddr(&sa, buf, szp, t));
-}
-
 static const nni_option sfd_listener_options[] = {
 	{
 	    .o_name = NNG_OPT_SOCKET_FD,
 	    .o_set  = sfd_listener_set_fd,
-	},
-	{
-	    .o_name = NNG_OPT_LOCADDR,
-	    .o_get  = sfd_listener_get_addr,
 	},
 	{
 	    .o_name = NULL,

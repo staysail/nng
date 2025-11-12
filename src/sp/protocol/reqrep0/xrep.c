@@ -8,9 +8,15 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <string.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/message.h"
+#include "../../../core/msgqueue.h"
+#include "../../../core/pipe.h"
+#include "../../../core/platform.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 #define REP0_SELF 0x31
 #define REP0_PEER 0x30
@@ -424,7 +430,6 @@ static nni_proto_sock_ops xrep0_sock_ops = {
 };
 
 static nni_proto xrep0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { REP0_SELF, REP0_SELF_NAME },
 	.proto_peer     = { REP0_PEER, REP0_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV | NNI_PROTO_FLAG_RAW,

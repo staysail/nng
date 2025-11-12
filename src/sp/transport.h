@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2018 Devolutions <info@devolutions.net>
 //
@@ -12,9 +12,9 @@
 #ifndef PROTOCOL_SP_TRANSPORT_H
 #define PROTOCOL_SP_TRANSPORT_H
 
-#include "core/defs.h"
-#include "core/list.h"
-#include "core/options.h"
+#include "../core/defs.h"
+#include "../core/list.h"
+#include "../core/options.h"
 
 // Endpoint operations are called by the socket in a
 // protocol-independent fashion.  The socket makes individual calls,
@@ -188,6 +188,16 @@ struct nni_sp_pipe_ops {
 	// p_getopt is used to obtain an option.  Pipes don't implement
 	// option setting.
 	nng_err (*p_getopt)(void *, const char *, void *, size_t *, nni_type);
+
+	// p_self_addr obtains the local sockaddr.
+	const nng_sockaddr *(*p_self_addr)(void *);
+
+	// p_peer_addr obtains the peer sockaddr.
+	const nng_sockaddr *(*p_peer_addr)(void *);
+
+	// p_peer_cert is used to obtain a peer cert for transports that
+	// implement TLS.
+	nng_err (*p_peer_cert)(void *, nng_tls_cert **);
 };
 
 // Transport implementation details.  Transports must implement the

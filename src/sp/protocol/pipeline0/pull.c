@@ -8,9 +8,13 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/list.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
 
 // Pull protocol.  The PULL protocol is the "read" side of a pipeline.
 
@@ -282,7 +286,6 @@ static nni_proto_sock_ops pull0_sock_ops = {
 };
 
 static nni_proto pull0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_PULL_V0, "pull" },
 	.proto_peer     = { NNI_PROTO_PUSH_V0, "push" },
 	.proto_flags    = NNI_PROTO_FLAG_RCV,
@@ -291,7 +294,6 @@ static nni_proto pull0_proto = {
 };
 
 static nni_proto pull0_proto_raw = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_PULL_V0, "pull" },
 	.proto_peer     = { NNI_PROTO_PUSH_V0, "push" },
 	.proto_flags    = NNI_PROTO_FLAG_RCV | NNI_PROTO_FLAG_RAW,

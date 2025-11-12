@@ -8,7 +8,7 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include "core/nng_impl.h"
+#include "../../core/nng_impl.h"
 #include "http_api.h"
 #include "nng/http.h"
 
@@ -24,6 +24,21 @@ nng_http_get_header(nng_http *conn, const char *key)
 	NNI_ARG_UNUSED(conn);
 	NNI_ARG_UNUSED(key);
 	return (NULL);
+#endif
+}
+
+bool
+nng_http_next_header(
+    nng_http *conn, const char **key, const char **val, void **ptr)
+{
+#ifdef NNG_SUPP_HTTP
+	return (nni_http_next_header(conn, key, val, ptr));
+#else
+	NNI_ARG_UNUSED(conn);
+	NNI_ARG_UNUSED(key);
+	NNI_ARG_UNUSED(val);
+	NNI_ARG_UNUSED(ptr);
+	return (NNG_ENOTSUP);
 #endif
 }
 
@@ -73,7 +88,7 @@ nng_http_set_body(nng_http *conn, void *data, size_t sz)
 	NNI_ARG_UNUSED(conn);
 	NNI_ARG_UNUSED(data);
 	NNI_ARG_UNUSED(sz);
-	return (NNG_ENOTSUP);
+	return;
 #endif
 }
 
@@ -108,7 +123,7 @@ nng_http_get_uri(nng_http *conn)
 #ifdef NNG_SUPP_HTTP
 	return (nni_http_get_uri(conn));
 #else
-	NNI_ARG_UNUSED(req);
+	NNI_ARG_UNUSED(conn);
 	return (NULL);
 #endif
 }
@@ -132,7 +147,7 @@ nng_http_get_version(nng_http *conn)
 #ifdef NNG_SUPP_HTTP
 	return (nni_http_get_version(conn));
 #else
-	NNI_ARG_UNUSED(res);
+	NNI_ARG_UNUSED(conn);
 	return (NULL);
 #endif
 }
@@ -143,7 +158,7 @@ nng_http_set_status(nng_http *conn, nng_http_status status, const char *reason)
 #ifdef NNG_SUPP_HTTP
 	nni_http_set_status(conn, status, reason);
 #else
-	NNI_ARG_UNUSED(res);
+	NNI_ARG_UNUSED(conn);
 	NNI_ARG_UNUSED(status);
 	NNI_ARG_UNUSED(reason);
 #endif
@@ -155,8 +170,7 @@ nng_http_get_status(nng_http *conn)
 #ifdef NNG_SUPP_HTTP
 	return (nni_http_get_status(conn));
 #else
-	NNI_ARG_UNUSED(res);
-	NNI_ARG_UNUSED(status);
+	NNI_ARG_UNUSED(conn);
 	return (0);
 #endif
 }
@@ -167,8 +181,7 @@ nng_http_get_reason(nng_http *conn)
 #ifdef NNG_SUPP_HTTP
 	return (nni_http_get_reason(conn));
 #else
-	NNI_ARG_UNUSED(res);
-	NNI_ARG_UNUSED(status);
+	NNI_ARG_UNUSED(conn);
 	return (0);
 #endif
 }
@@ -291,6 +304,20 @@ nng_http_read_response(nng_http *conn, nng_aio *aio)
 	NNI_ARG_UNUSED(conn);
 	nni_aio_finish_error(aio, NNG_ENOTSUP);
 #endif
+}
+
+nng_err
+nng_http_remote_address(nng_http *conn, nng_sockaddr *addrp)
+{
+	*addrp = *(nni_http_peer_addr(conn));
+	return (NNG_OK);
+}
+
+nng_err
+nng_http_local_address(nng_http *conn, nng_sockaddr *addrp)
+{
+	*addrp = *(nni_http_self_addr(conn));
+	return (NNG_OK);
 }
 
 nng_err
@@ -538,14 +565,12 @@ nng_http_server_get_tls(nng_http_server *srv, nng_tls_config **cfg)
 }
 
 nng_err
-nng_http_server_get_addr(nng_http_server *srv, nng_sockaddr *addr)
+nng_http_server_get_port(nng_http_server *srv, int *port)
 {
 #ifdef NNG_SUPP_HTTP
-	size_t size = sizeof(nng_sockaddr);
-	if (srv == NULL || addr == NULL)
-		return NNG_EINVAL;
+	size_t size = sizeof(*port);
 	return (nni_http_server_get(
-	    srv, NNG_OPT_LOCADDR, addr, &size, NNI_TYPE_SOCKADDR));
+	    srv, NNG_OPT_BOUND_PORT, port, &size, NNI_TYPE_INT32));
 #else
 	NNI_ARG_UNUSED(srv);
 	NNI_ARG_UNUSED(addr);
@@ -560,7 +585,7 @@ nng_http_server_error(nng_http_server *srv, nng_http *conn)
 	return (nni_http_server_error(srv, conn));
 #else
 	NNI_ARG_UNUSED(srv);
-	NNI_ARG_UNUSED(res);
+	NNI_ARG_UNUSED(conn);
 	return (NNG_ENOTSUP);
 #endif
 }
@@ -650,6 +675,18 @@ nng_http_reset(nng_http *conn)
 #ifdef NNG_SUPP_HTTP
 	nni_http_conn_reset(conn);
 #else
-	NNI_ARG_UNUSED(req);
+	NNI_ARG_UNUSED(conn);
+#endif
+}
+
+nng_err
+nng_http_peer_cert(nng_http *conn, nng_tls_cert **certp)
+{
+#ifdef NNG_SUPP_HTTP
+	return (nni_http_conn_peer_cert(conn, certp));
+#else
+	NNI_ARG_UNUSED(conn);
+	NNI_ARG_UNUSED(certp);
+	return (NNG_ENOTSUP);
 #endif
 }

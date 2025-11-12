@@ -1,5 +1,5 @@
 //
-// Copyright 2021 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 //
 // This software is supplied under the terms of the MIT License, a
@@ -11,7 +11,7 @@
 #ifndef CORE_PROTOCOL_H
 #define CORE_PROTOCOL_H
 
-#include "core/options.h"
+#include "options.h"
 
 // Protocol implementation details.  Protocols must implement the
 // interfaces in this file.  Note that implementing new protocols is
@@ -124,7 +124,6 @@ typedef struct nni_proto_id {
 } nni_proto_id;
 
 struct nni_proto {
-	uint32_t                  proto_version;  // Ops vector version
 	nni_proto_id              proto_self;     // Our identity
 	nni_proto_id              proto_peer;     // Peer identity
 	uint32_t                  proto_flags;    // Protocol flags
@@ -132,17 +131,6 @@ struct nni_proto {
 	const nni_proto_pipe_ops *proto_pipe_ops; // Per-pipe operations
 	const nni_proto_ctx_ops  *proto_ctx_ops;  // Context operations
 };
-
-// We quite intentionally use a signature where the upper word is nonzero,
-// which ensures that if we get garbage we will reject it.  This is more
-// likely to mismatch than all zero bytes would.  The actual version is
-// stored in the lower word; this is not semver -- the numbers are just
-// increasing - we doubt it will increase more than a handful of times
-// during the life of the project.  If we add a new version, please keep
-// the old version around -- it may be possible to automatically convert
-// older versions in the future.
-#define NNI_PROTOCOL_V3 0x50520003u // "pr\0\3"
-#define NNI_PROTOCOL_VERSION NNI_PROTOCOL_V3
 
 // These flags determine which operations make sense.  We use them so that
 // we can reject attempts to create notification fds for operations that make
@@ -168,7 +156,7 @@ extern int nni_proto_open(nng_socket *, const nni_proto *);
 // There are gaps in the list, which are obsolete or unsupported protocols.
 // Protocol numbers are never more than 16 bits.  Also, there will never be
 // a valid protocol numbered 0 (NNG_PROTO_NONE).
-#define NNI_PROTO(major, minor) (((major) *16) + (minor))
+#define NNI_PROTO(major, minor) (((major) * 16) + (minor))
 
 // Protocol major numbers.  This is here for documentation only, and
 // to serve as a "registry" for managing new protocol numbers.  Consider

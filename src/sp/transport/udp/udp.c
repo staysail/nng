@@ -5,17 +5,7 @@
 // file was obtained (LICENSE.txt).  A copy of the license may also be
 // found online at https://opensource.org/licenses/MIT.
 //
-#include <stdio.h>
-
-#include "core/aio.h"
-#include "core/defs.h"
-#include "core/idhash.h"
-#include "core/message.h"
-#include "core/nng_impl.h"
-#include "core/options.h"
-#include "core/pipe.h"
-#include "core/platform.h"
-#include "nng/nng.h"
+#include "../../../core/nng_impl.h"
 
 #include <string.h>
 
@@ -269,6 +259,20 @@ udp_pipe_start(udp_pipe *p, udp_ep *ep, const nng_sockaddr *sa)
 	p->expire = now + (p->dialer ? (5 * NNI_SECOND) : UDP_PIPE_TIMEOUT(p));
 
 	return (udp_add_pipe(ep, p));
+}
+
+static const nng_sockaddr *
+udp_pipe_peer_addr(void *arg)
+{
+	udp_pipe *p = arg;
+	return (&p->peer_addr);
+}
+
+static const nng_sockaddr *
+udp_pipe_self_addr(void *arg)
+{
+	udp_pipe *p = arg;
+	return (&p->ep->self_sa);
 }
 
 static void
@@ -989,26 +993,10 @@ udp_pipe_get_recvmax(void *arg, void *v, size_t *szp, nni_type t)
 	return (rv);
 }
 
-static nng_err
-udp_pipe_get_remaddr(void *arg, void *v, size_t *szp, nni_type t)
-{
-	udp_pipe *p  = arg;
-	udp_ep   *ep = p->ep;
-	nng_err   rv;
-	nni_mtx_lock(&ep->mtx);
-	rv = nni_copyout_sockaddr(&p->peer_addr, v, szp, t);
-	nni_mtx_unlock(&ep->mtx);
-	return (rv);
-}
-
 static nni_option udp_pipe_options[] = {
 	{
 	    .o_name = NNG_OPT_RECVMAXSZ,
 	    .o_get  = udp_pipe_get_recvmax,
-	},
-	{
-	    .o_name = NNG_OPT_REMADDR,
-	    .o_get  = udp_pipe_get_remaddr,
 	},
 	{
 	    .o_name = NULL,
@@ -1543,22 +1531,6 @@ udp_ep_get_locaddr(void *arg, void *v, size_t *szp, nni_opt_type t)
 }
 
 static nng_err
-udp_ep_get_remaddr(void *arg, void *v, size_t *szp, nni_opt_type t)
-{
-	udp_ep      *ep = arg;
-	nng_err      rv;
-	nng_sockaddr sa;
-
-	if (!ep->dialer) {
-		return (NNG_ENOTSUP);
-	}
-	sa = ep->peer_sa;
-
-	rv = nni_copyout_sockaddr(&sa, v, szp, t);
-	return (rv);
-}
-
-static nng_err
 udp_ep_get_recvmaxsz(void *arg, void *v, size_t *szp, nni_opt_type t)
 {
 	udp_ep *ep = arg;
@@ -1703,15 +1675,17 @@ udp_pipe_size(void)
 }
 
 static nni_sp_pipe_ops udp_pipe_ops = {
-	.p_size   = udp_pipe_size,
-	.p_init   = udp_pipe_init,
-	.p_fini   = udp_pipe_fini,
-	.p_stop   = udp_pipe_stop,
-	.p_send   = udp_pipe_send,
-	.p_recv   = udp_pipe_recv,
-	.p_close  = udp_pipe_close,
-	.p_peer   = udp_pipe_peer,
-	.p_getopt = udp_pipe_getopt,
+	.p_size      = udp_pipe_size,
+	.p_init      = udp_pipe_init,
+	.p_fini      = udp_pipe_fini,
+	.p_stop      = udp_pipe_stop,
+	.p_send      = udp_pipe_send,
+	.p_recv      = udp_pipe_recv,
+	.p_close     = udp_pipe_close,
+	.p_peer      = udp_pipe_peer,
+	.p_getopt    = udp_pipe_getopt,
+	.p_peer_addr = udp_pipe_peer_addr,
+	.p_self_addr = udp_pipe_self_addr,
 };
 
 static const nni_option udp_ep_opts[] = {
@@ -1730,11 +1704,7 @@ static const nni_option udp_ep_opts[] = {
 	    .o_get  = udp_ep_get_locaddr,
 	},
 	{
-	    .o_name = NNG_OPT_REMADDR,
-	    .o_get  = udp_ep_get_remaddr,
-	},
-	{
-	    .o_name = NNG_OPT_TCP_BOUND_PORT,
+	    .o_name = NNG_OPT_BOUND_PORT,
 	    .o_get  = udp_ep_get_port,
 	},
 	// terminate list

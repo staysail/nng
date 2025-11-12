@@ -9,10 +9,16 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdbool.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/lmq.h"
+#include "../../../core/message.h"
+#include "../../../core/pipe.h"
+#include "../../../core/pollable.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 // Subscriber protocol.  The SUB protocol receives messages sent to
 // it from publishers, and filters out those it is not interested in,
@@ -677,7 +683,6 @@ static nni_proto_sock_ops sub0_sock_ops = {
 };
 
 static nni_proto sub0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { NNI_PROTO_SUB_V0, "sub" },
 	.proto_peer     = { NNI_PROTO_PUB_V0, "pub" },
 	.proto_flags    = NNI_PROTO_FLAG_RCV,

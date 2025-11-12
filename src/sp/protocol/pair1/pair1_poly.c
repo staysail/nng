@@ -8,9 +8,15 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdlib.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/idhash.h"
+#include "../../../core/message.h"
+#include "../../../core/msgqueue.h"
+#include "../../../core/pipe.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
+#include "../../../core/stats.h"
 
 #define PAIR1_SELF_NAME "pair1"
 #define PAIR1_PEER_NAME "pair1"
@@ -526,7 +532,6 @@ static nni_proto_sock_ops pair1poly_sock_ops = {
 };
 
 static nni_proto pair1poly_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { PAIR1_SELF, PAIR1_SELF_NAME },
 	.proto_peer     = { PAIR1_PEER, PAIR1_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV,

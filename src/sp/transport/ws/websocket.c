@@ -13,8 +13,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "core/nng_impl.h"
-#include "supplemental/websocket/websocket.h"
+#include "../../../core/nng_impl.h"
+#include "../../../supplemental/websocket/websocket.h"
 
 typedef struct ws_dialer   ws_dialer;
 typedef struct ws_listener ws_listener;
@@ -234,7 +234,7 @@ wstran_listener_bind(void *arg, nng_url *url)
 	if ((rv = nng_stream_listener_listen(l->listener)) == NNG_OK) {
 		int port;
 		nng_stream_listener_get_int(
-		    l->listener, NNG_OPT_TCP_BOUND_PORT, &port);
+		    l->listener, NNG_OPT_BOUND_PORT, &port);
 		url->u_port = (uint32_t) port;
 	}
 	return (rv);
@@ -328,6 +328,28 @@ wstran_pipe_getopt(
 	return (rv);
 }
 
+static nng_err
+wstran_pipe_peer_cert(void *arg, nng_tls_cert **certp)
+{
+	ws_pipe *p = arg;
+
+	return (nng_stream_peer_cert(p->ws, certp));
+}
+
+static const nng_sockaddr *
+wstran_pipe_peer_addr(void *arg)
+{
+	ws_pipe *p = arg;
+	return (nng_stream_peer_addr(p->ws));
+}
+
+static const nng_sockaddr *
+wstran_pipe_self_addr(void *arg)
+{
+	ws_pipe *p = arg;
+	return (nng_stream_self_addr(p->ws));
+}
+
 static size_t
 wstran_pipe_size(void)
 {
@@ -335,15 +357,18 @@ wstran_pipe_size(void)
 }
 
 static nni_sp_pipe_ops ws_pipe_ops = {
-	.p_size   = wstran_pipe_size,
-	.p_init   = wstran_pipe_init,
-	.p_fini   = wstran_pipe_fini,
-	.p_stop   = wstran_pipe_stop,
-	.p_send   = wstran_pipe_send,
-	.p_recv   = wstran_pipe_recv,
-	.p_close  = wstran_pipe_close,
-	.p_peer   = wstran_pipe_peer,
-	.p_getopt = wstran_pipe_getopt,
+	.p_size      = wstran_pipe_size,
+	.p_init      = wstran_pipe_init,
+	.p_fini      = wstran_pipe_fini,
+	.p_stop      = wstran_pipe_stop,
+	.p_send      = wstran_pipe_send,
+	.p_recv      = wstran_pipe_recv,
+	.p_close     = wstran_pipe_close,
+	.p_peer      = wstran_pipe_peer,
+	.p_getopt    = wstran_pipe_getopt,
+	.p_peer_cert = wstran_pipe_peer_cert,
+	.p_peer_addr = wstran_pipe_peer_addr,
+	.p_self_addr = wstran_pipe_self_addr,
 };
 
 static void

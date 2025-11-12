@@ -18,10 +18,8 @@
 void
 test_tcp_stream(void)
 {
-	nng_stream_dialer   *d = NULL;
-	nng_stream_listener *l = NULL;
-	nng_sockaddr         sa;
-	uint8_t              ip[4];
+	nng_stream_dialer   *d    = NULL;
+	nng_stream_listener *l    = NULL;
 	nng_aio             *daio = NULL;
 	nng_aio             *laio = NULL;
 	nng_aio             *maio = NULL;
@@ -30,10 +28,12 @@ test_tcp_stream(void)
 	nng_aio             *aio1;
 	nng_aio             *aio2;
 	nng_iov              iov;
-	nng_sockaddr         sa2;
+	const nng_sockaddr  *sap1;
+	const nng_sockaddr  *sap2;
 	char                 buf1[5];
 	char                 buf2[5];
 	bool                 on;
+	int                  port;
 
 	NUTS_PASS(nng_aio_alloc(&daio, NULL, NULL));
 	NUTS_PASS(nng_aio_alloc(&laio, NULL, NULL));
@@ -43,18 +43,12 @@ test_tcp_stream(void)
 
 	NUTS_PASS(nng_stream_listener_alloc(&l, "tcp://127.0.0.1"));
 	NUTS_PASS(nng_stream_listener_listen(l));
-
-	ip[0] = 127;
-	ip[1] = 0;
-	ip[2] = 0;
-	ip[3] = 1;
-	NUTS_PASS(nng_stream_listener_get_addr(l, NNG_OPT_LOCADDR, &sa));
-	NUTS_TRUE(sa.s_in.sa_port != 0);
-	NUTS_TRUE(memcmp(&sa.s_in.sa_addr, ip, 4) == 0);
+	NUTS_PASS(nng_stream_listener_get_int(l, NNG_OPT_BOUND_PORT, &port));
+	NUTS_TRUE(port > 0);
+	NUTS_TRUE(port <= 0xffff);
 
 	char uri[64];
-	snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%d",
-	    nuts_be16(sa.s_in.sa_port));
+	snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%d", port);
 
 	NUTS_PASS(nng_stream_dialer_alloc(&d, uri));
 	nng_stream_dialer_dial(d, daio);
@@ -105,16 +99,13 @@ test_tcp_stream(void)
 
 	NUTS_TRUE(memcmp(buf1, buf2, 5) == 0);
 
-	NUTS_PASS(nng_stream_get_addr(c2, NNG_OPT_LOCADDR, &sa2));
-	NUTS_TRUE(sa2.s_in.sa_family == NNG_AF_INET);
+	sap1 = nng_stream_self_addr(c2);
+	NUTS_TRUE(sap1->s_in.sa_family == NNG_AF_INET);
 
-	NUTS_TRUE(sa2.s_in.sa_addr == sa.s_in.sa_addr);
-	NUTS_TRUE(sa2.s_in.sa_port == sa.s_in.sa_port);
-
-	NUTS_PASS(nng_stream_get_addr(c1, NNG_OPT_REMADDR, &sa2));
-	NUTS_TRUE(sa2.s_in.sa_family == NNG_AF_INET);
-	NUTS_TRUE(sa2.s_in.sa_addr == sa.s_in.sa_addr);
-	NUTS_TRUE(sa2.s_in.sa_port == sa.s_in.sa_port);
+	sap2 = nng_stream_peer_addr(c1);
+	NUTS_TRUE(sap2->s_in.sa_family == NNG_AF_INET);
+	NUTS_TRUE(sap2->s_in.sa_addr == sap1->s_in.sa_addr);
+	NUTS_TRUE(sap2->s_in.sa_port == sap1->s_in.sa_port);
 
 	nng_stream_listener_free(l);
 	nng_stream_dialer_free(d);
@@ -164,7 +155,7 @@ test_tcp_listen_port_zero_not_bound(void)
 
 	// start a listening stream listener but do not call accept
 	NUTS_PASS(nng_stream_listener_alloc(&l, addr));
-	NUTS_FAIL(nng_stream_listener_get_int(l, NNG_OPT_TCP_BOUND_PORT, &p),
+	NUTS_FAIL(nng_stream_listener_get_int(l, NNG_OPT_BOUND_PORT, &p),
 	    NNG_ESTATE);
 	nng_stream_listener_free(l);
 }
@@ -204,8 +195,7 @@ test_tcp_listen_activation(void)
 
 	NUTS_PASS(nng_stream_listener_alloc(&l1, addr));
 	NUTS_PASS(nng_stream_listener_listen(l1));
-	NUTS_PASS(
-	    nng_stream_listener_get_int(l1, NNG_OPT_TCP_BOUND_PORT, &port));
+	NUTS_PASS(nng_stream_listener_get_int(l1, NNG_OPT_BOUND_PORT, &port));
 
 	snprintf(url, sizeof(url), "tcp4://127.0.0.1:%u", port);
 	NUTS_PASS(nng_stream_dialer_alloc(&d, url));
@@ -435,12 +425,6 @@ test_tcp_dialer_loc_addr(void)
 	nng_stream_dialer *d;
 	nng_sockaddr       sa;
 	NUTS_PASS(nng_stream_dialer_alloc(&d, "tcp://127.0.0.1:80"));
-	NUTS_PASS(nng_stream_dialer_get_addr(d, NNG_OPT_LOCADDR, &sa));
-	NUTS_TRUE(sa.s_family == NNG_AF_UNSPEC);
-
-	// cannot set a local port
-	sa.s_in.sa_family = NNG_AF_INET;
-	sa.s_in.sa_port   = 8080;
 	NUTS_FAIL(nng_stream_dialer_set_addr(d, NNG_OPT_LOCADDR, &sa),
 	    NNG_EADDRINVAL);
 

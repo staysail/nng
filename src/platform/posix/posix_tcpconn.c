@@ -1,5 +1,5 @@
 //
-// Copyright 2024 Staysail Systems, Inc. <info@staysail.tech>
+// Copyright 2025 Staysail Systems, Inc. <info@staysail.tech>
 // Copyright 2018 Capitar IT Group BV <info@capitar.com>
 // Copyright 2019 Devolutions <info@devolutions.net>
 //
@@ -8,9 +8,6 @@
 // file was obtained (LICENSE.txt).  A copy of the license may also be
 // found online at https://opensource.org/licenses/MIT.
 //
-
-#include "core/nng_impl.h"
-#include "platform/posix/posix_pollq.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +23,12 @@
 #define MSG_NOSIGNAL 0
 #endif
 
+#include "../../core/aio.h"
+#include "../../core/defs.h"
+#include "../../core/options.h"
+#include "../../core/platform.h"
+
+#include "posix_pollq.h"
 #include "posix_tcp.h"
 
 static void
@@ -332,42 +335,18 @@ tcp_recv(void *arg, nni_aio *aio)
 	nni_mtx_unlock(&c->mtx);
 }
 
-static nng_err
-tcp_get_peername(void *arg, void *buf, size_t *szp, nni_type t)
+static const nng_sockaddr *
+tcp_get_peer_addr(void *arg)
 {
-	nni_tcp_conn           *c = arg;
-	struct sockaddr_storage ss;
-	socklen_t               len = sizeof(ss);
-	int                     fd  = nni_posix_pfd_fd(&c->pfd);
-	nng_err                 rv;
-	nng_sockaddr            sa;
-
-	if (getpeername(fd, (void *) &ss, &len) != 0) {
-		return (nni_plat_errno(errno));
-	}
-	if ((rv = nni_posix_sockaddr2nn(&sa, &ss, len)) == NNG_OK) {
-		rv = nni_copyout_sockaddr(&sa, buf, szp, t);
-	}
-	return (rv);
+	nni_tcp_conn *c = arg;
+	return (&c->peer);
 }
 
-static nng_err
-tcp_get_sockname(void *arg, void *buf, size_t *szp, nni_type t)
+static const nng_sockaddr *
+tcp_get_self_addr(void *arg)
 {
-	nni_tcp_conn           *c = arg;
-	struct sockaddr_storage ss;
-	socklen_t               len = sizeof(ss);
-	int                     fd  = nni_posix_pfd_fd(&c->pfd);
-	int                     rv;
-	nng_sockaddr            sa;
-
-	if (getsockname(fd, (void *) &ss, &len) != 0) {
-		return (nni_plat_errno(errno));
-	}
-	if ((rv = nni_posix_sockaddr2nn(&sa, &ss, len)) == NNG_OK) {
-		rv = nni_copyout_sockaddr(&sa, buf, szp, t);
-	}
-	return (rv);
+	nni_tcp_conn *c = arg;
+	return (&c->self);
 }
 
 static nng_err
@@ -401,14 +380,6 @@ tcp_get_keepalive(void *arg, void *buf, size_t *szp, nni_type t)
 }
 
 static const nni_option tcp_options[] = {
-	{
-	    .o_name = NNG_OPT_REMADDR,
-	    .o_get  = tcp_get_peername,
-	},
-	{
-	    .o_name = NNG_OPT_LOCADDR,
-	    .o_get  = tcp_get_sockname,
-	},
 	{
 	    .o_name = NNG_OPT_TCP_NODELAY,
 	    .o_get  = tcp_get_nodelay,
@@ -452,13 +423,15 @@ nni_posix_tcp_alloc(nni_tcp_conn **cp, nni_tcp_dialer *d, int fd)
 	nni_aio_list_init(&c->writeq);
 	nni_posix_pfd_init(&c->pfd, fd, tcp_cb, c);
 
-	c->stream.s_free  = tcp_free;
-	c->stream.s_stop  = tcp_stop;
-	c->stream.s_close = tcp_close;
-	c->stream.s_recv  = tcp_recv;
-	c->stream.s_send  = tcp_send;
-	c->stream.s_get   = tcp_get;
-	c->stream.s_set   = tcp_set;
+	c->stream.s_free      = tcp_free;
+	c->stream.s_stop      = tcp_stop;
+	c->stream.s_close     = tcp_close;
+	c->stream.s_recv      = tcp_recv;
+	c->stream.s_send      = tcp_send;
+	c->stream.s_get       = tcp_get;
+	c->stream.s_set       = tcp_set;
+	c->stream.s_peer_addr = tcp_get_peer_addr;
+	c->stream.s_self_addr = tcp_get_self_addr;
 
 	*cp = c;
 	return (0);
@@ -467,9 +440,19 @@ nni_posix_tcp_alloc(nni_tcp_conn **cp, nni_tcp_dialer *d, int fd)
 void
 nni_posix_tcp_start(nni_tcp_conn *c, int nodelay, int keepalive)
 {
+	int fd = nni_posix_pfd_fd(&c->pfd);
 	// Configure the initial socket options.
-	(void) setsockopt(nni_posix_pfd_fd(&c->pfd), IPPROTO_TCP, TCP_NODELAY,
-	    &nodelay, sizeof(int));
-	(void) setsockopt(nni_posix_pfd_fd(&c->pfd), SOL_SOCKET, SO_KEEPALIVE,
-	    &keepalive, sizeof(int));
+	(void) setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(int));
+	(void) setsockopt(
+	    fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(int));
+
+	struct sockaddr_storage ss;
+	socklen_t               len = sizeof(ss);
+
+	// Get this info now so we can avoid system calls later.
+	(void) getpeername(fd, (void *) &ss, &len);
+	nni_posix_sockaddr2nn(&c->peer, &ss, len);
+
+	(void) getsockname(fd, (void *) &ss, &len);
+	nni_posix_sockaddr2nn(&c->self, &ss, len);
 }

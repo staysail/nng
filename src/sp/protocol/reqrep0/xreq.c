@@ -8,9 +8,13 @@
 // found online at https://opensource.org/licenses/MIT.
 //
 
-#include <stdio.h>
-
-#include "core/nng_impl.h"
+#include "../../../core/aio.h"
+#include "../../../core/defs.h"
+#include "../../../core/message.h"
+#include "../../../core/msgqueue.h"
+#include "../../../core/pipe.h"
+#include "../../../core/protocol.h"
+#include "../../../core/socket.h"
 
 #define REQ0_SELF 0x30
 #define REQ0_PEER 0x31
@@ -309,7 +313,6 @@ static nni_proto_sock_ops xreq0_sock_ops = {
 };
 
 static nni_proto xreq0_proto = {
-	.proto_version  = NNI_PROTOCOL_VERSION,
 	.proto_self     = { REQ0_SELF, REQ0_SELF_NAME },
 	.proto_peer     = { REQ0_PEER, REQ0_PEER_NAME },
 	.proto_flags    = NNI_PROTO_FLAG_SNDRCV | NNI_PROTO_FLAG_RAW,

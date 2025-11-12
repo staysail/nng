@@ -254,7 +254,7 @@ and for this purpose a header library is supplied.</p>
 </p>
 <p>The functionality described here is entirely contained in the
 <code>nng/args.h</code> header file, and may be used without previously
-initializing the library with <a href="/api/init.html#initialization"><code>nng_init</code></a>, and may even be used
+initializing the library with <a href="../api/init.html#initialization"><code>nng_init</code></a>, and may even be used
 in programs that are not linked against the NNG library.</p>
 </div>
 <h2 id="parse-command-line-arguments"><a class="header" href="#parse-command-line-arguments">Parse Command Line Arguments</a></h2>
@@ -301,9 +301,9 @@ referenced by <em>arg</em>.</p>
 returned.</p>
 <p>This function may return the following errors:</p>
 <ul>
-<li>[<code>NNG_ARG_AMBIGU</code>]: Parsed option matches more than one specification.</li>
-<li>[<code>NNG_ARG_MISSING</code>]: Option requires an argument, but one is not present.</li>
-<li>[<code>NNG_ARG_INVAL</code>]: An invalid (unknown) argument is present in <em>argv</em>.</li>
+<li><code>NNG_ARG_AMBIG</code>: Parsed option matches more than one specification.</li>
+<li><code>NNG_ARG_MISSING</code>: Option requires an argument, but one is not present.</li>
+<li><code>NNG_ARG_INVAL</code>: An invalid (unknown) argument is present in <em>argv</em>.</li>
 </ul>
 <h3 id="option-specification"><a class="header" href="#option-specification">Option Specification</a></h3>
 <p>The calling program must first create an array of <a name="a004"></a><code>nng_arg_spec</code> structures
@@ -415,8 +415,14 @@ unambiguously (meaning it must not match any other option specification.)</p>
         exit(1);
     }
 </code></pre>
+<!-- NOTE: This assumes that any page referencing this is located
+     in a directory two levels down.  Meaning ./api/somefile.md or
+     similar.  mdbook cannot accommodate links that are called from
+     different levels in the hierarchy. -->
 <!-- Symbol cross reference -->
 <!-- HTTP -->
+<!-- HTTP Status -->
+<!-- TLS -->
 <!-- Macros -->
 <!-- Protocols -->
 <!-- Transports -->
